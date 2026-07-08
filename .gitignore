@@ -1,0 +1,48 @@
+# IDE and System Files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.local
+
+# Go
+/backend-go/bin/
+/backend-go/dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Node / Next.js
+/frontend-nextjs/node_modules/
+/frontend-nextjs/.next/
+/frontend-nextjs/out/
+/frontend-nextjs/build/
+/frontend-nextjs/npm-debug.log*
+/frontend-nextjs/yarn-debug.log*
+/frontend-nextjs/yarn-error.log*
+/frontend-nextjs/.pnp*
+/frontend-nextjs/.yarn/
+
+# Python
+/ai-services-python/venv/
+/ai-services-python/.venv/
+/ai-services-python/env/
+/ai-services-python/ENV/
+/ai-services-python/pyvenv.cfg
+/ai-services-python/.ipynb_checkpoints/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environments and Secrets
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+*.env
+*.env.*

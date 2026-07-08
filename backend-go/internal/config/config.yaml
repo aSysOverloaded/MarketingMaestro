@@ -1,0 +1,33 @@
+workflows:
+  brochure_generation:
+    timeout: 60s
+    steps:
+      - name: UserProfileStep
+        retry_limit: 0
+      - name: ProductRecommenderStep
+        retry_limit: 0
+      - name: ContentPlannerStep
+        retry_limit: 3
+        backoff: exponential
+      - name: CopywriterStep
+        retry_limit: 3
+        backoff: exponential
+      - name: SpecCriticStep
+        retry_limit: 2
+        backoff: linear
+      - name: EvaluatorStep
+        retry_limit: 2
+        backoff: linear
+      - name: HTMLCompileStep
+        retry_limit: 1
+        backoff: linear
+      - name: PDFRenderStep
+        retry_limit: 2
+        backoff: linear
+      - name: EmailDispatchStep
+        retry_limit: 5
+        backoff: exponential
+
+feature_flags:
+  enable_critic: true
+  enable_ai_evaluator: false # Fallback to deterministic validation inside Go first
