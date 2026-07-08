@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"marketing-agent/internal/recommendation"
 	"marketing-agent/internal/workflow"
 )
 
@@ -30,6 +31,29 @@ func (s *CompileHTMLStep) Name() string {
 }
 
 // Execute parses variables and compiles them with the HTML/Tailwind template
+type recommendationItem struct {
+	Brand struct {
+		Name           string
+		PrimaryColor   string
+		SecondaryColor string
+		Initial        string
+	}
+	Vehicle struct {
+		Model      string
+		BasePrice  string
+		HeroImage  string
+		Seats      int
+		Horsepower int
+		Features   []string
+	}
+	Recommendation struct {
+		Score        int
+		MatchedRules []string
+		Explanation  string
+	}
+}
+
+// Execute parses variables and compiles them with the HTML/Tailwind template
 func (s *CompileHTMLStep) Execute(ctx *workflow.Context) (workflow.Result, error) {
 	// 1. Extract results from previous steps
 	userProfileRaw, ok := ctx.State.StepOutputs["UserProfileStep"]
@@ -45,16 +69,113 @@ func (s *CompileHTMLStep) Execute(ctx *workflow.Context) (workflow.Result, error
 	if !ok {
 		return nil, fmt.Errorf("missing product recommendation result from previous step")
 	}
-	rec, ok := recRaw.(workflow.RecommendationResult)
-	if !ok {
-		return nil, fmt.Errorf("invalid recommendation result format")
+
+	var recs []workflow.RecommendationResult
+	if slice, ok := recRaw.([]workflow.RecommendationResult); ok {
+		recs = slice
+	} else if single, ok := recRaw.(workflow.RecommendationResult); ok {
+		recs = []workflow.RecommendationResult{single}
+	} else if interfaceSlice, ok := recRaw.([]interface{}); ok {
+		for _, item := range interfaceSlice {
+			if rec, ok := item.(workflow.RecommendationResult); ok {
+				recs = append(recs, rec)
+			}
+		}
 	}
 
-	// 2. Fetch vehicle spec from static database matching RecommendationResult.VehicleID
-	vehicle := s.getVehicleSpecByID(rec.VehicleID)
+	if len(recs) == 0 {
+		return nil, fmt.Errorf("invalid or empty recommendation results")
+	}
 
-	// 3. Resolve Brand Guidelines based on vehicle name
-	brand := s.getBrandConfigByModel(vehicle.Model)
+	// 2. Fetch specifications and brand guidelines for all recommended options
+	var recommendationItems []recommendationItem
+	for _, r := range recs {
+		var veh templateVehicleSpec
+		found := false
+		if specsRaw, ok := ctx.State.StepOutputs["ProductRecommenderStep_Specs"]; ok {
+			if specsSlice, ok := specsRaw.([]recommendation.Vehicle); ok {
+				for _, spec := range specsSlice {
+					if spec.ID == r.VehicleID {
+						seats := 5
+						if sVal, ok := spec.EngineSpecs["seats"]; ok {
+							if sFloat, ok := sVal.(float64); ok {
+								seats = int(sFloat)
+							} else if sInt, ok := sVal.(int); ok {
+								seats = sInt
+							}
+						}
+						
+						descFeatures := spec.Features
+						if pCat, ok := spec.EngineSpecs["type"].(string); ok {
+							descFeatures = append([]string{fmt.Sprintf("Category: %s", pCat)}, descFeatures...)
+						}
+						if capVal, ok := spec.EngineSpecs["capacity"].(string); ok {
+							descFeatures = append([]string{fmt.Sprintf("Capacity: %s", capVal)}, descFeatures...)
+						}
+
+						veh = templateVehicleSpec{
+							Model:      spec.Model,
+							BasePrice:  fmt.Sprintf("%.2f", spec.BasePrice),
+							HeroImage:  "https://images.unsplash.com/photo-1584622650111-993a426fbf0a?auto=format&fit=crop&q=80&w=800",
+							Seats:      seats,
+							Horsepower: 0,
+							Features:   descFeatures,
+						}
+						
+						if strings.Contains(strings.ToLower(spec.Model), "refrigerator") {
+							veh.HeroImage = "https://images.unsplash.com/photo-1584622650111-993a426fbf0a?auto=format&fit=crop&q=80&w=800"
+						} else if strings.Contains(strings.ToLower(spec.Model), "washer") || strings.Contains(strings.ToLower(spec.Model), "washing") {
+							veh.HeroImage = "https://images.unsplash.com/photo-1545173168-9f1947eebd01?auto=format&fit=crop&q=80&w=800"
+						} else if strings.Contains(strings.ToLower(spec.Model), "tesla") {
+							veh.HeroImage = "https://images.unsplash.com/photo-1617788138017-80ad40651399?auto=format&fit=crop&q=80&w=800"
+						}
+
+						if hpVal, ok := spec.EngineSpecs["horsepower"]; ok {
+							if hpFloat, ok := hpVal.(float64); ok {
+								veh.Horsepower = int(hpFloat)
+							} else if hpInt, ok := hpVal.(int); ok {
+								veh.Horsepower = hpInt
+							}
+						}
+
+						found = true
+						break
+					}
+				}
+			}
+		}
+
+		if !found {
+			dbVeh := s.getVehicleSpecByID(r.VehicleID)
+			veh = templateVehicleSpec{
+				Model:      dbVeh.Model,
+				BasePrice:  dbVeh.BasePrice,
+				HeroImage:  dbVeh.HeroImage,
+				Seats:      dbVeh.Seats,
+				Horsepower: dbVeh.Horsepower,
+				Features:   dbVeh.Features,
+			}
+		}
+
+		brnd := s.getBrandConfigByModel(veh.Model)
+
+		item := recommendationItem{
+			Brand:   brnd,
+			Vehicle: veh,
+			Recommendation: struct {
+				Score        int
+				MatchedRules []string
+				Explanation  string
+			}{
+				Score:        r.Score,
+				MatchedRules: r.MatchedRules,
+				Explanation:  r.Explanation,
+			},
+		}
+		recommendationItems = append(recommendationItems, item)
+	}
+
+	globalBrand := recommendationItems[0].Brand
 
 	// 4. Resolve Copy (use AI output if generated; otherwise choose a deterministic fallback by segment)
 	copyText := s.resolveMarketingCopy(ctx, userProfile.Segment)
@@ -72,46 +193,25 @@ func (s *CompileHTMLStep) Execute(ctx *workflow.Context) (workflow.Result, error
 			Segment string
 			TraceID string
 		}
-		Vehicle struct {
-			Model     string
-			BasePrice string
-			HeroImage string
-			Seats     int
-			Horsepower int
-			Features  []string
-		}
-		Recommendation struct {
-			Score        int
-			MatchedRules []string
-			Explanation  string
-		}
-		Copy struct {
+		Recommendations []recommendationItem
+		Copy            struct {
 			Headline    string
 			Subheadline string
 			CTAText     string
 		}
 	}{
-		Brand: brand,
+		Brand: globalBrand,
 		User: struct {
 			Email   string
 			Segment string
 			TraceID string
 		}{
-			Email:   ctx.State.UserProfileID, // using UserProfileID as placeholder or user_email
+			Email:   ctx.State.UserProfileID,
 			Segment: userProfile.Segment,
 			TraceID: ctx.TraceID,
 		},
-		Vehicle:        vehicle,
-		Recommendation: struct {
-			Score        int
-			MatchedRules []string
-			Explanation  string
-		}{
-			Score:        rec.Score,
-			MatchedRules: rec.MatchedRules,
-			Explanation:  rec.Explanation,
-		},
-		Copy:           copyText,
+		Recommendations: recommendationItems,
+		Copy:            copyText,
 	}
 
 	// Ensure email falls back if empty
@@ -124,7 +224,12 @@ func (s *CompileHTMLStep) Execute(ctx *workflow.Context) (workflow.Result, error
 
 	// 6. Execute HTML Template compilation
 	templatePath := filepath.Join(s.templatesDir, "brochure_template.html")
-	tmpl, err := template.ParseFiles(templatePath)
+	tmpl := template.New(filepath.Base(templatePath)).Funcs(template.FuncMap{
+		"add": func(a, b int) int {
+			return a + b
+		},
+	})
+	tmpl, err := tmpl.ParseFiles(templatePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse html brochure template: %w", err)
 	}

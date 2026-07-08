@@ -1,12 +1,13 @@
 package steps
 
 import (
-	"strings"
+	"encoding/json"
+	"fmt"
 
 	"marketing-agent/internal/workflow"
 )
 
-// UserProfileStep runs deterministic rules to translate user demographics into a segment
+// UserProfileStep translates user demographics into a segment using Gemini
 type UserProfileStep struct{}
 
 func NewUserProfileStep() *UserProfileStep {
@@ -26,47 +27,63 @@ func (s *UserProfileStep) Execute(ctx *workflow.Context) (workflow.Result, error
 	rawHobbies := []string{"trekking", "camping"}
 	rawLocation := "Seattle, WA"
 
-	segment := "Standard"
-	budgetTier := "Economy"
-
-	// 1. Determine Segment based on Hobbies
-	isAdventurer := false
-	for _, hobby := range rawHobbies {
-		h := strings.ToLower(hobby)
-		if h == "trekking" || h == "camping" || h == "skiing" || h == "adventure" || h == "offroading" {
-			isAdventurer = true
+	// Check if dynamic profile input was passed from a frontend/client
+	if inputRaw, ok := ctx.State.StepOutputs["UserProfileInput"]; ok {
+		if inputProfile, ok := inputRaw.(map[string]interface{}); ok {
+			if age, ok := inputProfile["age"].(int); ok {
+				rawAge = age
+			}
+			if income, ok := inputProfile["income"].(float64); ok {
+				rawIncome = income
+			}
+			if familySize, ok := inputProfile["family_size"].(int); ok {
+				rawFamilySize = familySize
+			}
+			if hobbies, ok := inputProfile["hobbies"].([]string); ok {
+				rawHobbies = hobbies
+			}
+			if location, ok := inputProfile["location"].(string); ok {
+				rawLocation = location
+			}
 		}
 	}
 
-	if isAdventurer {
-		segment = "Adventure"
-	} else if rawIncome >= 150000.0 && rawAge >= 30 {
-		segment = "Executive"
-	} else if rawFamilySize >= 5 {
-		segment = "Family"
+	hobbiesBytes, err := json.Marshal(rawHobbies)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal hobbies: %w", err)
 	}
 
-	// 2. Determine Budget Tier
-	if rawIncome >= 150000.0 {
-		budgetTier = "Ultra Luxury"
-	} else if rawIncome >= 90000.0 {
-		budgetTier = "Premium"
-	} else if rawIncome >= 50000.0 {
-		budgetTier = "Mid-Range"
-	}
+	prompt := fmt.Sprintf(`You are an expert marketing profiling agent.
+Classify the following user demographics into a segment and budget tier:
+- Age: %d
+- Annual Income: $%.2f
+- Family Size: %d
+- Hobbies: %s
+- Location: %s
 
-	// Result details
-	result := workflow.UserProfileResult{
-		UserProfileID: ctx.JobID + "_profile",
-		Segment:       segment,
-		BudgetTier:    budgetTier,
-		Attributes: map[string]interface{}{
-			"age":         rawAge,
-			"income":      rawIncome,
-			"family_size": rawFamilySize,
-			"hobbies":     rawHobbies,
-			"location":    rawLocation,
-		},
+Respond with a JSON object containing precisely these fields:
+{
+  "user_profile_id": "%s_profile",
+  "segment": "Segment Name (choose the best from: Adventure, Executive, Family, Standard)",
+  "budget_tier": "Budget Tier Name (choose the best from: Economy, Mid-Range, Premium, Ultra Luxury)",
+  "attributes": {
+    "age": %d,
+    "income": %.2f,
+    "family_size": %d,
+    "hobbies": %s,
+    "location": "%s"
+  }
+}
+Do not output any markdown formatting or commentary. Just output the raw JSON object.`,
+		rawAge, rawIncome, rawFamilySize, string(hobbiesBytes), rawLocation,
+		ctx.JobID,
+		rawAge, rawIncome, rawFamilySize, string(hobbiesBytes), rawLocation,
+	)
+
+	var result workflow.UserProfileResult
+	err = workflow.CallGemini(ctx, prompt, &result)
+	if err != nil {
+		return nil, fmt.Errorf("failed to classify user profile using Gemini: %w", err)
 	}
 
 	return result, nil

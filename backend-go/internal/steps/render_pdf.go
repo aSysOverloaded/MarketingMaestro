@@ -54,6 +54,10 @@ func (s *PDFRenderStep) Execute(ctx *workflow.Context) (workflow.Result, error) 
 
 	// 2. Headless Chrome detection and Developer Fallback
 	chromePath := findChrome()
+	if os.Getenv("DISABLE_CHROME_PDF") == "true" {
+		log.Printf("[TraceID: %s] [JobID: %s] [INFO] [PDFRenderStep] DISABLE_CHROME_PDF is enabled. Triggering developer fallback.", ctx.TraceID, ctx.JobID)
+		return s.executeDeveloperFallback(ctx, pdfFileName, pdfFilePath)
+	}
 	if chromePath == "" {
 		_, pathErr := exec.LookPath("google-chrome")
 		_, pathErr2 := exec.LookPath("chrome")

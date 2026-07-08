@@ -46,3 +46,6 @@ __pycache__/
 .env.production.local
 *.env
 *.env.*
+
+# Generated storage artifacts
+/backend-go/storage/

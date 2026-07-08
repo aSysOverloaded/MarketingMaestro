@@ -157,6 +157,10 @@ func (o *Orchestrator) updateJobStateContext(ctx *Context, stepName string, res 
 		ctx.State.UserProfileID = r.UserProfileID
 	case RecommendationResult:
 		ctx.State.RecommendationID = r.RecommendationID
+	case []RecommendationResult:
+		if len(r) > 0 {
+			ctx.State.RecommendationID = r[0].RecommendationID
+		}
 	case ContentPlanResult:
 		ctx.State.ContentPlanID = r.ContentPlanID
 	case GeneratedCopyResult:

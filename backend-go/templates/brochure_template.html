@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Personalized Vehicle Brochure</title>
+    <title>Personalized Vehicle Portfolio</title>
     <!-- Tailwind CSS CDN -->
     <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
     <style>
@@ -33,7 +33,7 @@
 </head>
 <body class="bg-gray-100 flex flex-col items-center py-8">
 
-    <!-- PAGE 1: HERO & PERSONALIZATION -->
+    <!-- PAGE 1: HERO & COMPARATIVE SUMMARY -->
     <div class="page shadow-2xl flex flex-col justify-between p-12 border-t-8" style="border-color: {{.Brand.PrimaryColor}};">
         
         <!-- Header logo -->
@@ -42,68 +42,94 @@
                 <div class="h-10 w-10 rounded-full flex items-center justify-center font-bold text-white text-lg shadow-md" style="background-color: {{.Brand.PrimaryColor}};">
                     {{.Brand.Initial}}
                 </div>
-                <span class="font-extrabold text-xl tracking-wider text-gray-800 uppercase brand-font">{{.Brand.Name}}</span>
+                <span class="font-extrabold text-xl tracking-wider text-gray-800 uppercase brand-font">{{.Brand.Name}} Group</span>
             </div>
             <span class="text-xs font-semibold tracking-widest text-gray-400 uppercase">Personalized Portfolio</span>
         </div>
 
-        <!-- Hero block -->
-        <div class="my-auto space-y-8">
-            <div class="relative rounded-3xl overflow-hidden shadow-2xl h-80 bg-gray-900 flex items-center justify-center">
-                <!-- Vehicle Hero Image with custom styled card overlay -->
-                <div class="absolute inset-0 bg-cover bg-center opacity-80" style="background-image: url('{{.Vehicle.HeroImage}}');"></div>
-                <div class="absolute inset-0 bg-gradient-to-t from-black via-black/40 to-transparent"></div>
-                
-                <div class="absolute bottom-8 left-8 right-8 text-white space-y-2">
-                    <span class="px-3 py-1 rounded-full text-xs font-bold uppercase tracking-widest bg-opacity-30 backdrop-filter backdrop-blur-md" style="background-color: {{.Brand.PrimaryColor}}; color: #ffffff;">
-                        {{.User.Segment}} Choice
-                    </span>
-                    <h1 class="text-4xl font-extrabold tracking-tight">{{.Vehicle.Model}}</h1>
-                    <p class="text-gray-300 text-sm font-medium tracking-wide">Premium curation designed for you.</p>
-                </div>
-            </div>
-
+        <!-- Hero block & Copy -->
+        <div class="my-auto space-y-6">
             <!-- Personalized Copy Section -->
-            <div class="space-y-4">
-                <h2 class="text-3xl font-extrabold tracking-tight text-gray-900" style="color: {{.Brand.PrimaryColor}};">
+            <div class="space-y-3">
+                <span class="px-3 py-1 rounded-full text-xs font-bold uppercase tracking-widest bg-blue-100 text-blue-800">
+                    {{.User.Segment}} Portfolio
+                </span>
+                <h2 class="text-3xl font-extrabold tracking-tight text-gray-900 mt-2" style="color: {{.Brand.PrimaryColor}};">
                     {{.Copy.Headline}}
                 </h2>
-                <h3 class="text-lg font-medium text-gray-600 italic">
+                <h3 class="text-base font-medium text-gray-500 italic">
                     {{.Copy.Subheadline}}
                 </h3>
                 <p class="text-gray-600 text-sm leading-relaxed">
-                    Hello {{.User.Email}}, based on your preferences, budget parameters, and lifestyle markers, we have curated a tailored breakdown of the {{.Vehicle.Model}} highlighting why it fits your everyday travel.
+                    Hello {{.User.Email}}, based on your preferences, budget parameters, and lifestyle markers, we have curated a tailored recommendation of the top vehicles matching your everyday travel needs. Below is a comparative overview of your matched recommendations.
                 </p>
+            </div>
+
+            <!-- Comparison Table -->
+            <div class="bg-gray-50 rounded-2xl p-5 border border-gray-100 space-y-3">
+                <p class="text-xs font-bold text-gray-400 uppercase tracking-wider">Your Matched Recommendations</p>
+                <div class="divide-y divide-gray-200">
+                    {{range $index, $item := .Recommendations}}
+                    <div class="flex items-center justify-between py-4">
+                        <div class="flex items-center space-x-3">
+                            <span class="h-6 w-6 rounded-full bg-blue-100 text-blue-800 font-bold text-xs flex items-center justify-center">{{add $index 1}}</span>
+                            <div>
+                                <h4 class="font-bold text-gray-800 text-sm">{{$item.Vehicle.Model}}</h4>
+                                <p class="text-xs text-gray-400">Starting from ${{$item.Vehicle.BasePrice}}</p>
+                            </div>
+                        </div>
+                        <div class="text-right">
+                            <span class="px-2.5 py-1 rounded-lg text-xs font-bold text-white" style="background-color: {{$item.Brand.PrimaryColor}};">
+                                Match: {{$item.Recommendation.Score}}%
+                            </span>
+                        </div>
+                    </div>
+                    {{end}}
+                </div>
             </div>
         </div>
 
         <!-- Footer -->
         <div class="flex justify-between items-center border-t border-gray-100 pt-6 text-xs text-gray-400">
             <span>Prepared for: {{.User.Email}}</span>
-            <span>Page 1 of 2</span>
+            <span>Page 1 of {{add (len .Recommendations) 1}}</span>
         </div>
     </div>
 
-    <!-- PAGE 2: SPECS, MATCH REASONS & FEATURES -->
-    <div class="page shadow-2xl flex flex-col justify-between p-12 border-t-8 mt-8" style="border-color: {{.Brand.PrimaryColor}};">
+    <!-- DETAIL PAGES: ONE FOR EACH RECOMMENDATION -->
+    {{range $index, $item := .Recommendations}}
+    <div class="page shadow-2xl flex flex-col justify-between p-12 border-t-8 mt-8" style="border-color: {{$item.Brand.PrimaryColor}};">
         
         <!-- Header -->
         <div class="flex justify-between items-center border-b border-gray-100 pb-4">
-            <span class="font-bold text-sm text-gray-700 uppercase tracking-widest">{{.Vehicle.Model}} Specifications</span>
-            <span class="text-xs text-gray-400">Match Score: {{.Recommendation.Score}}%</span>
+            <div class="flex items-center space-x-2">
+                <span class="font-bold text-sm text-gray-800 uppercase tracking-widest">{{$item.Vehicle.Model}}</span>
+                <span class="text-xs px-2 py-0.5 rounded-full text-white font-bold" style="background-color: {{$item.Brand.PrimaryColor}};">Option {{add $index 1}}</span>
+            </div>
+            <span class="text-xs font-bold text-gray-500 uppercase tracking-widest">Match Score: {{$item.Recommendation.Score}}%</span>
         </div>
 
-        <div class="my-auto space-y-8">
-            <!-- 1. Why we chose this (Scored Rules Explanation) -->
-            <div class="space-y-3">
-                <h3 class="font-extrabold text-lg text-gray-900 tracking-tight flex items-center">
-                    <span class="mr-2 text-xl" style="color: {{.Brand.PrimaryColor}};">✓</span> Why this vehicle fits your profile
-                </h3>
-                <div class="bg-gray-50 rounded-2xl p-5 border border-gray-100 space-y-3">
-                    <p class="text-xs font-semibold text-gray-500 uppercase tracking-wider">Matched Criteria</p>
-                    <ul class="space-y-2">
-                        {{range .Recommendation.MatchedRules}}
-                        <li class="flex items-start text-xs text-gray-700">
+        <div class="my-auto space-y-6">
+            <!-- Hero image -->
+            <div class="relative rounded-2xl overflow-hidden shadow-lg h-64 bg-gray-900">
+                <div class="absolute inset-0 bg-cover bg-center" style="background-image: url('{{$item.Vehicle.HeroImage}}');"></div>
+                <div class="absolute inset-0 bg-gradient-to-t from-black/60 to-transparent"></div>
+                <div class="absolute bottom-4 left-6 text-white">
+                    <span class="text-xs text-gray-300 font-medium tracking-wide">Dynamic Feature Spotlight</span>
+                    <h3 class="text-2xl font-bold">{{$item.Vehicle.Model}}</h3>
+                </div>
+            </div>
+
+            <!-- 1. Why we chose this -->
+            <div class="space-y-2">
+                <h4 class="font-extrabold text-sm text-gray-900 tracking-tight flex items-center">
+                    <span class="mr-1.5 text-lg" style="color: {{$item.Brand.PrimaryColor}};">✓</span> Why this option fits your profile
+                </h4>
+                <div class="bg-gray-50 rounded-xl p-4 border border-gray-100">
+                    <p class="text-xs text-gray-700 italic mb-2">"{{$item.Recommendation.Explanation}}"</p>
+                    <ul class="space-y-1.5">
+                        {{range $item.Recommendation.MatchedRules}}
+                        <li class="flex items-start text-xs text-gray-600">
                             <span class="text-green-500 mr-2 font-bold">✓</span>
                             <span>{{.}}</span>
                         </li>
@@ -114,53 +140,65 @@
 
             <!-- 2. Specifications Grid -->
             <div class="grid grid-cols-3 gap-4">
-                <div class="bg-gray-50 p-4 rounded-xl border border-gray-100 text-center">
-                    <span class="text-xs text-gray-400 font-semibold uppercase tracking-wider block">Base Price</span>
-                    <span class="text-lg font-bold text-gray-800 font-sans">${{.Vehicle.BasePrice}}</span>
+                <div class="bg-gray-50 p-3 rounded-xl border border-gray-100 text-center">
+                    <span class="text-[10px] text-gray-400 font-semibold uppercase tracking-wider block">Estimated Price</span>
+                    <span class="text-sm font-bold text-gray-800">${{$item.Vehicle.BasePrice}}</span>
                 </div>
-                <div class="bg-gray-50 p-4 rounded-xl border border-gray-100 text-center">
-                    <span class="text-xs text-gray-400 font-semibold uppercase tracking-wider block">Horsepower</span>
-                    <span class="text-lg font-bold text-gray-800 font-sans">{{.Vehicle.Horsepower}} HP</span>
+                {{if gt $item.Vehicle.Horsepower 0}}
+                <div class="bg-gray-50 p-3 rounded-xl border border-gray-100 text-center">
+                    <span class="text-[10px] text-gray-400 font-semibold uppercase tracking-wider block">Horsepower</span>
+                    <span class="text-sm font-bold text-gray-800">{{$item.Vehicle.Horsepower}} HP</span>
                 </div>
-                <div class="bg-gray-50 p-4 rounded-xl border border-gray-100 text-center">
-                    <span class="text-xs text-gray-400 font-semibold uppercase tracking-wider block">Engine / Seats</span>
-                    <span class="text-lg font-bold text-gray-800 font-sans">{{.Vehicle.Seats}} Seats</span>
+                {{else}}
+                <div class="bg-gray-50 p-3 rounded-xl border border-gray-100 text-center">
+                    <span class="text-[10px] text-gray-400 font-semibold uppercase tracking-wider block">Status</span>
+                    <span class="text-sm font-bold text-gray-800 text-green-600">Available</span>
                 </div>
+                {{end}}
+                {{if gt $item.Vehicle.Seats 0}}
+                <div class="bg-gray-50 p-3 rounded-xl border border-gray-100 text-center">
+                    <span class="text-[10px] text-gray-400 font-semibold uppercase tracking-wider block">Capacity</span>
+                    <span class="text-sm font-bold text-gray-800">{{$item.Vehicle.Seats}} Seats</span>
+                </div>
+                {{else}}
+                <div class="bg-gray-50 p-3 rounded-xl border border-gray-100 text-center">
+                    <span class="text-[10px] text-gray-400 font-semibold uppercase tracking-wider block">Quality</span>
+                    <span class="text-sm font-bold text-gray-800 text-blue-600">Certified</span>
+                </div>
+                {{end}}
             </div>
 
-            <!-- 3. Dynamic Features list -->
-            <div class="space-y-3">
-                <h3 class="font-extrabold text-sm text-gray-900 uppercase tracking-widest">Key Vehicle Highlights</h3>
+            <!-- 3. Features Highlights -->
+            <div class="space-y-2">
+                <h4 class="font-extrabold text-xs text-gray-900 uppercase tracking-widest">Key Product Highlights</h4>
                 <div class="grid grid-cols-2 gap-2 text-xs text-gray-600">
-                    {{range .Vehicle.Features}}
+                    {{range $item.Vehicle.Features}}
                     <div class="flex items-center space-x-2">
-                        <span class="h-1.5 w-1.5 rounded-full" style="background-color: {{$.Brand.PrimaryColor}};"></span>
+                        <span class="h-1.5 w-1.5 rounded-full" style="background-color: {{$item.Brand.PrimaryColor}};"></span>
                         <span>{{.}}</span>
                     </div>
                     {{end}}
                 </div>
             </div>
 
-            <!-- 4. CTA and Financing Block -->
-            <div class="rounded-2xl p-6 text-white text-center space-y-3 shadow-lg" style="background: linear-gradient(135deg, {{.Brand.PrimaryColor}} 0%, {{.Brand.SecondaryColor}} 100%);">
-                <h3 class="font-bold text-lg">Next Steps on Your Journey</h3>
-                <p class="text-xs text-blue-100 leading-relaxed max-w-md mx-auto">
-                    {{.Copy.CTAText}}
-                </p>
-                <div class="pt-2">
-                    <a href="#" class="inline-block bg-white text-gray-900 font-bold px-6 py-2.5 rounded-xl text-xs tracking-wider uppercase shadow-md hover:shadow-xl transition-all duration-300" style="color: {{.Brand.PrimaryColor}};">
-                        Schedule Test Drive
+            <!-- 4. Dynamic CTA -->
+            <div class="rounded-xl p-4 text-white text-center space-y-2.5 shadow-md" style="background: linear-gradient(135deg, {{$item.Brand.PrimaryColor}} 0%, {{$item.Brand.SecondaryColor}} 100%);">
+                <h4 class="font-bold text-sm">Interested in the {{$item.Vehicle.Model}}?</h4>
+                <div class="pt-0.5">
+                    <a href="#" class="inline-block bg-white font-bold px-4 py-1.5 rounded-lg text-xs tracking-wider uppercase shadow-sm hover:shadow-md transition-all duration-300" style="color: {{$item.Brand.PrimaryColor}};">
+                        Schedule Demo / View Details
                     </a>
                 </div>
             </div>
         </div>
 
         <!-- Footer -->
-        <div class="flex justify-between items-center border-t border-gray-100 pt-6 text-xs text-gray-400">
-            <span>Reference ID: {{.User.TraceID}}</span>
-            <span>Page 2 of 2</span>
+        <div class="flex justify-between items-center border-t border-gray-100 pt-4 text-xs text-gray-400">
+            <span>Reference ID: {{$.User.TraceID}}</span>
+            <span>Page {{add $index 2}} of {{add (len $.Recommendations) 1}}</span>
         </div>
     </div>
+    {{end}}
 
 </body>
 </html>
