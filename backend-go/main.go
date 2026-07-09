@@ -67,6 +67,7 @@ func main() {
 		familySize, _ := strconv.Atoi(r.FormValue("family_size"))
 		location := r.FormValue("location")
 		hobbiesRaw := r.FormValue("hobbies")
+		email := r.FormValue("email")
 
 		hobbies := []string{}
 		for _, h := range strings.Split(hobbiesRaw, ",") {
@@ -92,6 +93,9 @@ func main() {
 		if len(hobbies) == 0 {
 			hobbies = []string{"trekking", "camping"}
 		}
+		if email == "" {
+			email = "customer@example.com"
+		}
 
 		// Create dynamic profile input map
 		profileInput := map[string]interface{}{
@@ -113,6 +117,7 @@ func main() {
 
 		// Pre-populate input demographics into the context map
 		state.StepOutputs["UserProfileInput"] = profileInput
+		state.StepOutputs["UserProfileEmail"] = email
 
 		// 3. Extract and Process the PDF file if uploaded
 		file, _, err := r.FormFile("brochure")
@@ -208,6 +213,71 @@ func main() {
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(responsePayload)
+	})
+
+	// API Endpoint to send the generated PDF brochure dynamically on-demand
+	http.HandleFunc("/api/send-email", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		if r.Method != "POST" {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		jobID := r.FormValue("job_id")
+		email := r.FormValue("email")
+
+		if jobID == "" || email == "" {
+			http.Error(w, "Missing job_id or email parameters", http.StatusBadRequest)
+			return
+		}
+
+		// Locate generated PDF
+		pdfPath := filepath.Join(tempPdfDir, fmt.Sprintf("brochure_job_%s.pdf", jobID))
+		if _, err := os.Stat(pdfPath); os.IsNotExist(err) {
+			http.Error(w, "PDF brochure file not found. Please regenerate recommendation first.", http.StatusNotFound)
+			return
+		}
+
+		smtpHost := os.Getenv("SMTP_HOST")
+		smtpPort := os.Getenv("SMTP_PORT")
+		smtpUser := os.Getenv("SMTP_USER")
+		smtpPass := os.Getenv("SMTP_PASS")
+
+		if smtpHost == "" || smtpUser == "" {
+			// Mock simulated send if SMTP is not configured
+			log.Printf("[Live Email Bypass] Simulating email send to %s for JobID: %s", email, jobID)
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": true,
+				"message": "Demo Mode: Email dispatch simulated successfully! (To send real emails, set SMTP environment variables)",
+			})
+			return
+		}
+
+		subject := "Your Personalized Product Brochure & Recommendations"
+		bodyText := "Dear Customer,\n\nPlease find attached your custom-compiled product recommendation brochure.\n\nWarm regards,\nSales & Marketing Team"
+
+		err := steps.SendSMTPEmail(smtpHost, smtpPort, smtpUser, smtpPass, email, subject, bodyText, pdfPath)
+		if err != nil {
+			log.Printf("[Email API Error] Failed to send SMTP email: %v", err)
+			http.Error(w, fmt.Sprintf("Failed to dispatch email: %v", err), http.StatusInternalServerError)
+			return
+		}
+
+		log.Printf("[Email API Success] Live SMTP email sent successfully to %s for JobID: %s", email, jobID)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"message": fmt.Sprintf("Email sent successfully to %s!", email),
+		})
 	})
 
 	// Serve generated files from the storage path
