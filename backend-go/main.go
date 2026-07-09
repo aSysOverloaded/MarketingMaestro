@@ -147,6 +147,10 @@ func main() {
 		// 4. Instantiate Steps & Declare Workflow
 		stepProfile := steps.NewUserProfileStep()
 		stepRecommend := steps.NewProductRecommenderStep(recommendation.NewVehicleMatcher())
+		stepPlanner := steps.NewPlannerStep()
+		stepWriter := steps.NewWriterStep()
+		stepCritic := steps.NewCriticStep()
+		stepEvaluator := steps.NewEvaluatorStep()
 		stepCompile := steps.NewCompileHTMLStep(templatesDir, tempHtmlDir)
 		stepRender := steps.NewPDFRenderStep(tempPdfDir)
 		stepEmail := steps.NewEmailDispatchStep(tempEmailDir)
@@ -156,6 +160,10 @@ func main() {
 			Steps: []workflow.Step{
 				stepProfile,
 				stepRecommend,
+				stepPlanner,
+				stepWriter,
+				stepCritic,
+				stepEvaluator,
 				stepCompile,
 				stepRender,
 				stepEmail,
@@ -169,6 +177,16 @@ func main() {
 				"ProductRecommenderStep": {
 					MaxRetries:      3,
 					BackoffStrategy: "exponential",
+					InitialInterval: 2 * time.Second,
+				},
+				"WriterStep": {
+					MaxRetries:      3,
+					BackoffStrategy: "exponential",
+					InitialInterval: 2 * time.Second,
+				},
+				"CriticStep": {
+					MaxRetries:      2,
+					BackoffStrategy: "linear",
 					InitialInterval: 2 * time.Second,
 				},
 			},

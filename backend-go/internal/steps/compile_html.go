@@ -373,6 +373,21 @@ func (s *CompileHTMLStep) resolveMarketingCopy(ctx *workflow.Context, segment st
 	Subheadline string
 	CTAText     string
 } {
+	// Check if dynamic AI copy writer step output is present
+	if writerRaw, ok := ctx.State.StepOutputs["WriterStep"]; ok {
+		if writerRes, ok := writerRaw.(WriterResult); ok {
+			return struct {
+				Headline    string
+				Subheadline string
+				CTAText     string
+			}{
+				Headline:    writerRes.Headline,
+				Subheadline: writerRes.Subheadline,
+				CTAText:     writerRes.CTA,
+			}
+		}
+	}
+
 	// First check if AI copy is available in step outputs
 	if copyRaw, ok := ctx.State.StepOutputs["CopywriterStep"]; ok {
 		if copyResult, ok := copyRaw.(workflow.GeneratedCopyResult); ok {
