@@ -303,7 +303,8 @@ func (s *CompileHTMLStep) getBrandConfigByModel(model string) struct {
 	SecondaryColor string
 	Initial        string
 } {
-	if strings.Contains(strings.ToLower(model), "bmw") {
+	lowerModel := strings.ToLower(model)
+	if strings.Contains(lowerModel, "bmw") {
 		return struct {
 			Name           string
 			PrimaryColor   string
@@ -312,10 +313,10 @@ func (s *CompileHTMLStep) getBrandConfigByModel(model string) struct {
 		}{
 			Name:           "BMW",
 			PrimaryColor:   "#0066b2", // BMW Blue
-			SecondaryColor: "#000000", // Black
+			SecondaryColor: "#000000",
 			Initial:        "B",
 		}
-	} else if strings.Contains(strings.ToLower(model), "adventure") {
+	} else if strings.Contains(lowerModel, "adventure") || strings.Contains(lowerModel, "navigator") {
 		return struct {
 			Name           string
 			PrimaryColor   string
@@ -327,6 +328,30 @@ func (s *CompileHTMLStep) getBrandConfigByModel(model string) struct {
 			SecondaryColor: "#064e3b",
 			Initial:        "N",
 		}
+	} else if strings.Contains(lowerModel, "samsung") || strings.Contains(lowerModel, "nq70") || strings.Contains(lowerModel, "nv51") || strings.Contains(lowerModel, "rf28") || strings.Contains(lowerModel, "dw80") {
+		return struct {
+			Name           string
+			PrimaryColor   string
+			SecondaryColor string
+			Initial        string
+		}{
+			Name:           "Samsung",
+			PrimaryColor:   "#1428a0", // Samsung Blue
+			SecondaryColor: "#000000",
+			Initial:        "S",
+		}
+	} else if strings.Contains(lowerModel, "lg") || strings.Contains(lowerModel, "wash") || strings.Contains(lowerModel, "dryer") {
+		return struct {
+			Name           string
+			PrimaryColor   string
+			SecondaryColor string
+			Initial        string
+		}{
+			Name:           "LG Electronics",
+			PrimaryColor:   "#a50034", // LG Red
+			SecondaryColor: "#3c3c3c",
+			Initial:        "L",
+		}
 	}
 
 	return struct {
@@ -335,10 +360,10 @@ func (s *CompileHTMLStep) getBrandConfigByModel(model string) struct {
 		SecondaryColor string
 		Initial        string
 	}{
-		Name:           "Elite Motors",
+		Name:           "Premium Home",
 		PrimaryColor:   "#1e3a8a", // Dark Blue
 		SecondaryColor: "#0f172a",
-		Initial:        "E",
+		Initial:        "P",
 	}
 }
 
@@ -374,9 +399,9 @@ func (s *CompileHTMLStep) resolveMarketingCopy(ctx *workflow.Context, segment st
 			Subheadline string
 			CTAText     string
 		}{
-			Headline:    "Adventure Starts Here",
-			Subheadline: "Designed for every weekend escape.",
-			CTAText:     "Explore trails and climb mountains confidently with high clearance and rugged AWD systems. Take control of your next excursion by arranging a test drive.",
+			Headline:    "Innovative Living & Performance",
+			Subheadline: "Engineered to elevate your daily experience.",
+			CTAText:     "Designed with advanced technology and premium materials, these options deliver top-tier efficiency and modern control. Schedule a live demonstration or contact a sales specialist to learn more.",
 		}
 	case "family", "family safety":
 		return struct {
@@ -384,9 +409,9 @@ func (s *CompileHTMLStep) resolveMarketingCopy(ctx *workflow.Context, segment st
 			Subheadline string
 			CTAText     string
 		}{
-			Headline:    "Safety & Comfort Redefined",
-			Subheadline: "Engineered around the family roadtrip experience.",
-			CTAText:     "Designed with top-tier safety features, flexible seating arrangements, and premium cabin isolation, ensuring every journey is secure. Request a demo drive.",
+			Headline:    "Reliability & Comfort Redefined",
+			Subheadline: "Built around your family's daily needs.",
+			CTAText:     "Offering spacious capacities, quiet operation, and certified reliability, this selection ensures every daily routine runs smoothly. Contact us to learn more or request a product demo.",
 		}
 	default:
 		return struct {
@@ -394,9 +419,9 @@ func (s *CompileHTMLStep) resolveMarketingCopy(ctx *workflow.Context, segment st
 			Subheadline string
 			CTAText     string
 		}{
-			Headline:    "Performance Meets Luxury",
-			Subheadline: "Precision handling and class-leading comforts.",
-			CTAText:     "Experience a drive optimized for quiet daily commutes, responsive cruising speeds, and modern driver-assist systems. Curation begins with a test drive.",
+			Headline:    "Premium Quality & Design",
+			Subheadline: "Sophisticated style meets high-efficiency features.",
+			CTAText:     "Experience a selection curated for premium performance, elegant aesthetics, and modern convenience features. Schedule a live demo or contact our sales support for details.",
 		}
 	}
 }
