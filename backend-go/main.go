@@ -155,6 +155,18 @@ func main() {
 				stepRender,
 				stepEmail,
 			},
+			RetryPolicies: map[string]workflow.RetryPolicy{
+				"UserProfileStep": {
+					MaxRetries:      3,
+					BackoffStrategy: "exponential",
+					InitialInterval: 2 * time.Second,
+				},
+				"ProductRecommenderStep": {
+					MaxRetries:      3,
+					BackoffStrategy: "exponential",
+					InitialInterval: 2 * time.Second,
+				},
+			},
 		}
 
 		// 5. Execute Pipeline
