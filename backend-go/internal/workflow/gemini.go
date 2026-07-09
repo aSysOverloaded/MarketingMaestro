@@ -63,7 +63,7 @@ func CallGemini(ctx *Context, prompt string, target interface{}) error {
 		return simulateFallback(prompt, target)
 	}
 
-	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=%s", apiKey)
+	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=%s", apiKey)
 
 	reqBody := GeminiRequest{
 		Contents: []GeminiContent{
@@ -174,7 +174,7 @@ func ParsePDFBrochure(ctx *Context, pdfBytes []byte) ([]recommendation.Vehicle, 
 		}, nil
 	}
 
-	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=%s", apiKey)
+	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=%s", apiKey)
 
 	base64Data := base64.StdEncoding.EncodeToString(pdfBytes)
 
