@@ -268,6 +268,11 @@ func queryRAGAndParse(ctx *workflow.Context, query string) ([]recommendation.Can
 		return nil, fmt.Errorf("RAG search returned 0 matches")
 	}
 
+	log.Printf("[TraceID: %s] [JobID: %s] [RAG] Qdrant search results received from Python sidecar:", ctx.TraceID, ctx.JobID)
+	for i, match := range searchResp.Matches {
+		log.Printf("[RAG Result #%d] Page: %d, Score: %f, Images: %v, Content Length: %d characters", i+1, match.PageNumber, match.Score, match.Images, len(match.Content))
+	}
+
 	var buffer bytes.Buffer
 	for _, match := range searchResp.Matches {
 		buffer.WriteString(fmt.Sprintf("--- PAGE %d ---\n%s\n", match.PageNumber, match.Content))
