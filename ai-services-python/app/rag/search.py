@@ -37,6 +37,25 @@ def embed_text(text: str, is_query: bool = False) -> list:
         return [0.1] * VECTOR_DIMENSION
 
 def ingest_pdf(pdf_bytes: bytes) -> dict:
+def embed_texts(texts: list, is_query: bool = False) -> list:
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        return [[0.1] * VECTOR_DIMENSION] * len(texts)
+
+    genai.configure(api_key=api_key)
+    task_type = "retrieval_query" if is_query else "retrieval_document"
+    try:
+        result = genai.embed_content(
+            model="models/text-embedding-004",
+            content=texts,
+            task_type=task_type
+        )
+        return result["embedding"]
+    except Exception as e:
+        print(f"Batch embedding failed: {e}")
+        return [[0.1] * VECTOR_DIMENSION] * len(texts)
+
+def ingest_pdf(pdf_bytes: bytes) -> dict:
     # 1. Clear and create the Qdrant collection
     initialize_collection()
 
@@ -53,6 +72,10 @@ def ingest_pdf(pdf_bytes: bytes) -> dict:
     
     indexed_count = 0
     points = []
+    
+    # Store page texts and details for batch processing
+    pages_to_embed = []
+    page_details = []
 
     for i, page in enumerate(reader.pages):
         text = page.extract_text() or ""
@@ -77,21 +100,26 @@ def ingest_pdf(pdf_bytes: bytes) -> dict:
         except Exception as e:
             print(f"Failed to extract images on page {i+1}: {e}")
 
-        # 3. Create vector embedding
-        vector = embed_text(text, is_query=False)
+        pages_to_embed.append(text)
+        page_details.append({
+            "page_number": i + 1,
+            "content": text,
+            "images": image_paths
+        })
 
-        # 4. Create Qdrant indexing point
-        point_id = str(uuid.uuid4())
-        points.append(PointStruct(
-            id=point_id,
-            vector=vector,
-            payload={
-                "page_number": i + 1,
-                "content": text,
-                "images": image_paths
-            }
-        ))
-        indexed_count += 1
+    # 3. Create vector embeddings in exactly ONE batch request
+    if pages_to_embed:
+        vectors = embed_texts(pages_to_embed, is_query=False)
+
+        # 4. Create Qdrant indexing points
+        for idx, details in enumerate(page_details):
+            point_id = str(uuid.uuid4())
+            points.append(PointStruct(
+                id=point_id,
+                vector=vectors[idx],
+                payload=details
+            ))
+            indexed_count += 1
 
     # 5. Insert points into Qdrant index
     if points:

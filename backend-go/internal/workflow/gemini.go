@@ -141,7 +141,7 @@ func ParsePDFBrochure(ctx *Context, pdfBytes []byte) ([]recommendation.Vehicle, 
 	}
 	bodyWriter.Close()
 
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := &http.Client{Timeout: 120 * time.Second}
 	reqUrl := fmt.Sprintf("%s/api/rag/ingest", pythonUrl)
 	req, err := http.NewRequestWithContext(ctx, "POST", reqUrl, bodyBuf)
 	if err != nil {
