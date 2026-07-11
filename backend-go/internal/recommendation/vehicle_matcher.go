@@ -14,6 +14,7 @@ type Vehicle struct {
 	Features    []string               `json:"features"`
 	EngineSpecs map[string]interface{} `json:"engine_specs"`
 	Colors      []string               `json:"colors"`
+	HeroImage   string                 `json:"hero_image,omitempty"`
 }
 
 // GetID implements Candidate

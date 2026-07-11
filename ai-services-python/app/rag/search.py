@@ -40,6 +40,13 @@ def ingest_pdf(pdf_bytes: bytes) -> dict:
     # 1. Clear and create the Qdrant collection
     initialize_collection()
 
+    # Resolve Go backend storage path for extracted images
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    backend_storage = os.path.abspath(os.path.join(current_dir, "..", "..", "..", "backend-go", "storage", "extracted_images"))
+    if not os.path.exists(os.path.join(backend_storage, "..")):
+        backend_storage = os.path.abspath(os.path.join(current_dir, "..", "..", "backend-go", "storage", "extracted_images"))
+    os.makedirs(backend_storage, exist_ok=True)
+
     # 2. Parse PDF content
     pdf_file = io.BytesIO(pdf_bytes)
     reader = pypdf.PdfReader(pdf_file)
@@ -53,6 +60,23 @@ def ingest_pdf(pdf_bytes: bytes) -> dict:
         if not text:
             continue
 
+        # Extract images from this page
+        image_paths = []
+        try:
+            for img_idx, img_file in enumerate(page.images):
+                img_ext = os.path.splitext(img_file.name)[1] if img_file.name else ".png"
+                if not img_ext or img_ext == ".":
+                    img_ext = ".png"
+                img_name = f"page_{i+1}_img_{img_idx}{img_ext}"
+                dest_path = os.path.join(backend_storage, img_name)
+                
+                with open(dest_path, "wb") as f:
+                    f.write(img_file.data)
+                
+                image_paths.append(f"/storage/extracted_images/{img_name}")
+        except Exception as e:
+            print(f"Failed to extract images on page {i+1}: {e}")
+
         # 3. Create vector embedding
         vector = embed_text(text, is_query=False)
 
@@ -63,7 +87,8 @@ def ingest_pdf(pdf_bytes: bytes) -> dict:
             vector=vector,
             payload={
                 "page_number": i + 1,
-                "content": text
+                "content": text,
+                "images": image_paths
             }
         ))
         indexed_count += 1
@@ -99,12 +124,13 @@ def search_catalog(query: str, limit: int = 3) -> list:
         limit=limit
     )
 
-    # 3. Format and return matched text payloads
+    # 3. Format and return matched payloads including images
     matches = []
     for hit in search_results:
         matches.append({
             "page_number": hit.payload.get("page_number"),
             "content": hit.payload.get("content"),
+            "images": hit.payload.get("images", []),
             "score": hit.score
         })
     return matches

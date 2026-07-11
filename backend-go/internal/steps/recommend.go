@@ -248,9 +248,10 @@ func queryRAGAndParse(ctx *workflow.Context, query string) ([]recommendation.Can
 
 	var searchResp struct {
 		Matches []struct {
-			PageNumber int     `json:"page_number"`
-			Content    string  `json:"content"`
-			Score      float64 `json:"score"`
+			PageNumber int      `json:"page_number"`
+			Content    string   `json:"content"`
+			Images     []string `json:"images"`
+			Score      float64  `json:"score"`
 		} `json:"matches"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&searchResp); err != nil {
@@ -280,7 +281,8 @@ For each item, respond with a JSON object matching this structure:
     "capacity": "Specifications (e.g. 26 cu. ft., 5.0 cu. ft., or 5 seats)",
     "power": "Power specs or Horsepower if applicable"
   },
-  "colors": ["Color 1", "Color 2"]
+  "colors": ["Color 1", "Color 2"],
+  "page_number": X // Keep the page number integer from the matched section title (e.g. 3 if matching --- PAGE 3 ---)
 }
 If pricing or specific specs are not listed, make a highly accurate estimate.
 
@@ -289,14 +291,40 @@ Matched Pages Content:
 
 Respond with a JSON array containing these objects. Do not output any markdown formatting or commentary. Just output the raw JSON array.`, matchedText)
 
-	var catalog []recommendation.Vehicle
-	err = workflow.CallGemini(ctx, prompt, &catalog)
+	var parsedItems []struct {
+		ID          string                 `json:"id"`
+		Model       string                 `json:"model"`
+		BasePrice   float64                `json:"base_price"`
+		Features    []string               `json:"features"`
+		EngineSpecs map[string]interface{} `json:"engine_specs"`
+		Colors      []string               `json:"colors"`
+		PageNumber  int                    `json:"page_number"`
+	}
+
+	err = workflow.CallGemini(ctx, prompt, &parsedItems)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse matched pages using Gemini: %w", err)
 	}
 
 	var candidates []recommendation.Candidate
-	for _, v := range catalog {
+	for _, parsed := range parsedItems {
+		v := recommendation.Vehicle{
+			ID:          parsed.ID,
+			Model:       parsed.Model,
+			BasePrice:   parsed.BasePrice,
+			Features:    parsed.Features,
+			EngineSpecs: parsed.EngineSpecs,
+			Colors:      parsed.Colors,
+		}
+
+		// Lookup original matching RAG hit to copy its page-extracted image
+		for _, match := range searchResp.Matches {
+			if match.PageNumber == parsed.PageNumber && len(match.Images) > 0 {
+				v.HeroImage = match.Images[0]
+				break
+			}
+		}
+
 		candidates = append(candidates, v)
 	}
 	return candidates, nil

@@ -116,18 +116,27 @@ func (s *CompileHTMLStep) Execute(ctx *workflow.Context) (workflow.Result, error
 						veh = templateVehicleSpec{
 							Model:      spec.Model,
 							BasePrice:  fmt.Sprintf("%.2f", spec.BasePrice),
-							HeroImage:  "https://images.unsplash.com/photo-1584622650111-993a426fbf0a?auto=format&fit=crop&q=80&w=800",
+							HeroImage:  spec.HeroImage,
 							Seats:      seats,
 							Horsepower: 0,
 							Features:   descFeatures,
 						}
 						
-						if strings.Contains(strings.ToLower(spec.Model), "refrigerator") {
-							veh.HeroImage = "https://images.unsplash.com/photo-1584622650111-993a426fbf0a?auto=format&fit=crop&q=80&w=800"
-						} else if strings.Contains(strings.ToLower(spec.Model), "washer") || strings.Contains(strings.ToLower(spec.Model), "washing") {
-							veh.HeroImage = "https://images.unsplash.com/photo-1545173168-9f1947eebd01?auto=format&fit=crop&q=80&w=800"
-						} else if strings.Contains(strings.ToLower(spec.Model), "tesla") {
-							veh.HeroImage = "https://images.unsplash.com/photo-1617788138017-80ad40651399?auto=format&fit=crop&q=80&w=800"
+						if veh.HeroImage == "" {
+							modelLower := strings.ToLower(spec.Model)
+							if strings.Contains(modelLower, "refrigerator") || strings.Contains(modelLower, "fridge") {
+								veh.HeroImage = "https://images.unsplash.com/photo-1588854337236-6889d631faa8?auto=format&fit=crop&q=80&w=800" // Real Refrigerator
+							} else if strings.Contains(modelLower, "washer") || strings.Contains(modelLower, "washing") || strings.Contains(modelLower, "dryer") {
+								veh.HeroImage = "https://images.unsplash.com/photo-1626806787461-102c1bfaaea1?auto=format&fit=crop&q=80&w=800" // Real Washer/dryer
+							} else if strings.Contains(modelLower, "range") || strings.Contains(modelLower, "oven") || strings.Contains(modelLower, "stove") || strings.Contains(modelLower, "cooktop") {
+								veh.HeroImage = "https://images.unsplash.com/photo-1590794056226-79ef3a8147e1?auto=format&fit=crop&q=80&w=800" // Real Oven/Stove
+							} else if strings.Contains(modelLower, "dishwasher") {
+								veh.HeroImage = "https://images.unsplash.com/photo-1585837554808-a1179311a2f4?auto=format&fit=crop&q=80&w=800" // Real Dishwasher
+							} else if strings.Contains(modelLower, "tesla") || strings.Contains(modelLower, "car") || strings.Contains(modelLower, "suv") {
+								veh.HeroImage = "https://images.unsplash.com/photo-1617788138017-80ad40651399?auto=format&fit=crop&q=80&w=800" // Tesla/car
+							} else {
+								veh.HeroImage = "https://images.unsplash.com/photo-1556910103-1c02745aae4d?auto=format&fit=crop&q=80&w=800" // Default: Modern kitchen
+							}
 						}
 
 						if hpVal, ok := spec.EngineSpecs["horsepower"]; ok {
