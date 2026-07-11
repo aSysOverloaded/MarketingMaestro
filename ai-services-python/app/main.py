@@ -1,5 +1,5 @@
 import os
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File
 from pydantic import BaseModel
 from typing import List, Dict, Any
 
@@ -7,6 +7,7 @@ from app.ai.planner import generate_plan
 from app.ai.writer import generate_copy
 from app.ai.critic import audit_copy
 from app.ai.evaluator import evaluate_copy
+from app.rag.search import ingest_pdf, search_catalog
 
 app = FastAPI(title="AI Services Python Sidecar")
 
@@ -78,6 +79,27 @@ def evaluate_endpoint(payload: EvaluateRequest):
     try:
         result = evaluate_copy(payload.copy)
         return EvaluateResponse(**result)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+class SearchRequest(BaseModel):
+    query: str
+    limit: int = 3
+
+@app.post("/api/rag/ingest")
+async def ingest_endpoint(file: UploadFile = File(...)):
+    try:
+        pdf_bytes = await file.read()
+        res = ingest_pdf(pdf_bytes)
+        return res
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/rag/search")
+def search_endpoint(payload: SearchRequest):
+    try:
+        matches = search_catalog(payload.query, payload.limit)
+        return {"matches": matches}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

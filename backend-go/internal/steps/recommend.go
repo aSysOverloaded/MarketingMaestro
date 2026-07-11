@@ -1,8 +1,13 @@
 package steps
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"log"
+	"net/http"
+	"os"
+	"time"
 
 	"marketing-agent/internal/recommendation"
 	"marketing-agent/internal/workflow"
@@ -69,14 +74,31 @@ func (s *ProductRecommenderStep) Execute(ctx *workflow.Context) (workflow.Result
 		Location:   "Seattle, WA",
 	}
 
-	// 2. Fetch candidates catalog (mock database fetch)
+	// 2. Fetch candidates catalog (RAG or cache resolution)
 	var candidates []recommendation.Candidate
 
-	// Check if a custom uploaded catalog array is provided in context
-	if catalogRaw, ok := ctx.State.StepOutputs["UploadedCatalog"]; ok {
-		if catalogList, ok := catalogRaw.([]recommendation.Vehicle); ok && len(catalogList) > 0 {
-			for _, v := range catalogList {
-				candidates = append(candidates, v)
+	// Check if local Qdrant RAG index is active
+	ragActiveRaw, hasRAG := ctx.State.StepOutputs["RAGActive"]
+	ragActive, _ := ragActiveRaw.(bool)
+
+	if hasRAG && ragActive {
+		log.Printf("[TraceID: %s] [JobID: %s] [RAG] Searching in-memory Qdrant database...", ctx.TraceID, ctx.JobID)
+		queryText := fmt.Sprintf("hobbies: %v, family size: %d, location: %s", userProfile.Hobbies, userProfile.FamilySize, userProfile.Location)
+		ragCandidates, err := queryRAGAndParse(ctx, queryText)
+		if err != nil {
+			log.Printf("[TraceID: %s] [JobID: %s] [RAG] [WARNING] Qdrant search/parse failed: %v. Bypassing to default catalog.", ctx.TraceID, ctx.JobID, err)
+		} else {
+			candidates = ragCandidates
+		}
+	}
+
+	if len(candidates) == 0 {
+		// Check if a custom uploaded catalog array is provided in context (legacy/simulation fallback)
+		if catalogRaw, ok := ctx.State.StepOutputs["UploadedCatalog"]; ok {
+			if catalogList, ok := catalogRaw.([]recommendation.Vehicle); ok && len(catalogList) > 0 {
+				for _, v := range catalogList {
+					candidates = append(candidates, v)
+				}
 			}
 		}
 	}
@@ -193,6 +215,89 @@ Do not output any markdown formatting or commentary. Just output the raw JSON ar
 		}
 	}
 	ctx.State.StepOutputs["ProductRecommenderStep_Specs"] = selectedSpecs
-
+ 
 	return ranks, nil
+}
+
+func queryRAGAndParse(ctx *workflow.Context, query string) ([]recommendation.Candidate, error) {
+	pythonUrl := os.Getenv("PYTHON_SERVICE_URL")
+	if pythonUrl == "" {
+		pythonUrl = "http://localhost:8000"
+	}
+
+	payload := map[string]interface{}{
+		"query": query,
+		"limit": 3,
+	}
+	jsonBytes, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	reqUrl := fmt.Sprintf("%s/api/rag/search", pythonUrl)
+	resp, err := client.Post(reqUrl, "application/json", bytes.NewBuffer(jsonBytes))
+	if err != nil {
+		return nil, fmt.Errorf("RAG search HTTP error: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("RAG search status code error: %d", resp.StatusCode)
+	}
+
+	var searchResp struct {
+		Matches []struct {
+			PageNumber int     `json:"page_number"`
+			Content    string  `json:"content"`
+			Score      float64 `json:"score"`
+		} `json:"matches"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&searchResp); err != nil {
+		return nil, fmt.Errorf("failed to decode RAG search matches: %w", err)
+	}
+
+	if len(searchResp.Matches) == 0 {
+		return nil, fmt.Errorf("RAG search returned 0 matches")
+	}
+
+	var buffer bytes.Buffer
+	for _, match := range searchResp.Matches {
+		buffer.WriteString(fmt.Sprintf("--- PAGE %d ---\n%s\n", match.PageNumber, match.Content))
+	}
+	matchedText := buffer.String()
+
+	prompt := fmt.Sprintf(`You are an expert product catalog extraction agent.
+Analyze the following text matching relevant product pages from a PDF brochure and extract a list of catalog items described.
+For each item, respond with a JSON object matching this structure:
+{
+  "id": "short_unique_id (e.g. appliance_fridge_samsung)",
+  "model": "Full Product Model Name (e.g. Samsung Family Hub Refrigerator)",
+  "base_price": 2499.0,
+  "features": ["Feature 1", "Feature 2", "Feature 3", ...],
+  "engine_specs": {
+    "type": "Product Category (e.g. Refrigerator, Washer, Sedan)",
+    "capacity": "Specifications (e.g. 26 cu. ft., 5.0 cu. ft., or 5 seats)",
+    "power": "Power specs or Horsepower if applicable"
+  },
+  "colors": ["Color 1", "Color 2"]
+}
+If pricing or specific specs are not listed, make a highly accurate estimate.
+
+Matched Pages Content:
+%s
+
+Respond with a JSON array containing these objects. Do not output any markdown formatting or commentary. Just output the raw JSON array.`, matchedText)
+
+	var catalog []recommendation.Vehicle
+	err = workflow.CallGemini(ctx, prompt, &catalog)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse matched pages using Gemini: %w", err)
+	}
+
+	var candidates []recommendation.Candidate
+	for _, v := range catalog {
+		candidates = append(candidates, v)
+	}
+	return candidates, nil
 }
