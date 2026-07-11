@@ -36,7 +36,6 @@ def embed_text(text: str, is_query: bool = False) -> list:
         # Fallback in case of rate limits or transient issues
         return [0.1] * VECTOR_DIMENSION
 
-def ingest_pdf(pdf_bytes: bytes) -> dict:
 def embed_texts(texts: list, is_query: bool = False) -> list:
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
