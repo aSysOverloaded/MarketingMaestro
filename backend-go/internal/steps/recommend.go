@@ -116,34 +116,40 @@ func (s *ProductRecommenderStep) Execute(ctx *workflow.Context) (workflow.Result
 	if len(candidates) == 0 {
 		candidates = []recommendation.Candidate{
 			recommendation.Vehicle{
-				ID:        "car_bmw_x3",
-				Model:     "BMW X3",
-				BasePrice: 65000,
-				Features:  []string{"AWD", "Panoramic Sunroof", "Roof Rails", "Leather Seats"},
+				ID:        "appliance_fridge_samsung",
+				Model:     "Samsung Family Hub Refrigerator",
+				BasePrice: 2499,
+				Features:  []string{"Wi-Fi Connected Screen", "Triple Cooling System", "Internal Cameras", "Water & Ice Dispenser"},
 				EngineSpecs: map[string]interface{}{
-					"seats": 5,
+					"seats":    0,
+					"type":     "Refrigerator",
+					"capacity": "26.5 cu. ft.",
 				},
-				Colors: []string{"Alpine White", "Black Sapphire"},
+				Colors: []string{"Stainless Steel", "Black Stainless Steel"},
 			},
 			recommendation.Vehicle{
-				ID:        "suv_7seater",
-				Model:     "Adventure Navigator 7S",
-				BasePrice: 80000,
-				Features:  []string{"AWD", "Roof Rails", "Tow Hitch", "Heavy Duty Suspension"},
+				ID:        "appliance_washer_lg",
+				Model:     "LG TurboWash Washing Machine",
+				BasePrice: 899,
+				Features:  []string{"AI DD Smart Fabric Care", "TurboWash 360", "Steam Technology", "ThinQ Wi-Fi Control"},
 				EngineSpecs: map[string]interface{}{
-					"seats": 7,
+					"seats":    0,
+					"type":     "Washing Machine",
+					"capacity": "5.0 cu. ft.",
 				},
-				Colors: []string{"Forest Green", "Stealth Grey"},
+				Colors: []string{"Graphite", "White"},
 			},
 			recommendation.Vehicle{
-				ID:        "sedan_compact",
-				Model:     "Economy Touring Sedan",
-				BasePrice: 43000,
-				Features:  []string{"Front Wheel Drive", "Smart Cruise Control"},
+				ID:        "appliance_dishwasher_bosch",
+				Model:     "Bosch 800 Series Dishwasher",
+				BasePrice: 1299,
+				Features:  []string{"CrystalDry Technology", "Whisper Quiet 42 dBA", "Flexible 3rd Rack", "Home Connect Smart Control"},
 				EngineSpecs: map[string]interface{}{
-					"seats": 5,
+					"seats":    0,
+					"type":     "Dishwasher",
+					"capacity": "16 Place Settings",
 				},
-				Colors: []string{"Silver Metallic", "Midnight Black"},
+				Colors: []string{"Stainless Steel", "Black Stainless Steel"},
 			},
 		}
 	}
@@ -160,7 +166,7 @@ func (s *ProductRecommenderStep) Execute(ctx *workflow.Context) (workflow.Result
 	}
 
 	prompt := fmt.Sprintf(`You are an expert sales and recommendation agent.
-Given the following User Profile and Candidate Vehicles Catalog, rank the candidates in descending order of how well they match the user's needs.
+Given the following User Profile and Candidate Products Catalog, rank the candidates in descending order of how well they match the user's needs.
 Select the top candidates (select 2 options) that are suitable.
 
 User Profile:
@@ -169,10 +175,10 @@ User Profile:
 Candidate Catalog:
 %s
 
-For each recommended vehicle, calculate:
-- A match score (0 to 100) based on budget suitability, size requirements, active hobbies vs vehicle features (like AWD/Roof Rails), and segment fit.
-- Matched rules: specific, concise reasons why it matches (e.g. "Fits budget", "AWD fits outdoor lifestyle", "7 seats matches family size").
-- Explanation: a 1-sentence summary of why this vehicle is recommended for the user.
+For each recommended product, calculate:
+- A match score (0 to 100) based on budget suitability, capacity/size requirements, active hobbies vs product features, and segment fit.
+- Matched rules: specific, concise reasons why it matches (e.g. "Fits budget", "Large capacity fits family size").
+- Explanation: a 1-sentence summary of why this product is recommended for the user.
 
 Respond with a JSON array containing precisely these objects (ordered by score descending):
 [
