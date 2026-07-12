@@ -38,12 +38,13 @@ type recommendationItem struct {
 		SecondaryColor string
 		Initial        string
 	}
-	Vehicle struct {
+	Product struct {
 		Model      string
 		BasePrice  string
 		HeroImage  string
 		Seats      int
 		Horsepower int
+		Capacity   string
 		Features   []string
 	}
 	Recommendation struct {
@@ -90,14 +91,14 @@ func (s *CompileHTMLStep) Execute(ctx *workflow.Context) (workflow.Result, error
 	// 2. Fetch specifications and brand guidelines for all recommended options
 	var recommendationItems []recommendationItem
 	for _, r := range recs {
-		var veh templateVehicleSpec
+		var prod templateProductSpec
 		found := false
 		if specsRaw, ok := ctx.State.StepOutputs["ProductRecommenderStep_Specs"]; ok {
-			if specsSlice, ok := specsRaw.([]recommendation.Vehicle); ok {
+			if specsSlice, ok := specsRaw.([]recommendation.Product); ok {
 				for _, spec := range specsSlice {
-					if spec.ID == r.VehicleID {
+					if spec.ID == r.ProductID {
 						seats := 5
-						if sVal, ok := spec.EngineSpecs["seats"]; ok {
+						if sVal, ok := spec.Specs["seats"]; ok {
 							if sFloat, ok := sVal.(float64); ok {
 								seats = int(sFloat)
 							} else if sInt, ok := sVal.(int); ok {
@@ -106,44 +107,55 @@ func (s *CompileHTMLStep) Execute(ctx *workflow.Context) (workflow.Result, error
 						}
 						
 						descFeatures := spec.Features
-						if pCat, ok := spec.EngineSpecs["type"].(string); ok {
+						if pCat, ok := spec.Specs["type"].(string); ok {
 							descFeatures = append([]string{fmt.Sprintf("Category: %s", pCat)}, descFeatures...)
 						}
-						if capVal, ok := spec.EngineSpecs["capacity"].(string); ok {
+						if capVal, ok := spec.Specs["capacity"].(string); ok {
 							descFeatures = append([]string{fmt.Sprintf("Capacity: %s", capVal)}, descFeatures...)
 						}
 
-						veh = templateVehicleSpec{
+						capacityStr := ""
+						if capVal, ok := spec.Specs["capacity"].(string); ok {
+							capacityStr = capVal
+						}
+
+						prod = templateProductSpec{
 							Model:      spec.Model,
 							BasePrice:  fmt.Sprintf("%.2f", spec.BasePrice),
 							HeroImage:  spec.HeroImage,
 							Seats:      seats,
 							Horsepower: 0,
+							Capacity:   capacityStr,
 							Features:   descFeatures,
 						}
 						
-						if veh.HeroImage == "" {
+						if prod.HeroImage == "" {
+							prodType := ""
+							if tVal, ok := spec.Specs["type"].(string); ok {
+								prodType = strings.ToLower(tVal)
+							}
 							modelLower := strings.ToLower(spec.Model)
-							if strings.Contains(modelLower, "refrigerator") || strings.Contains(modelLower, "fridge") {
-								veh.HeroImage = "https://images.unsplash.com/photo-1588854337236-6889d631faa8?auto=format&fit=crop&q=80&w=800" // Real Refrigerator
-							} else if strings.Contains(modelLower, "washer") || strings.Contains(modelLower, "washing") || strings.Contains(modelLower, "dryer") {
-								veh.HeroImage = "https://images.unsplash.com/photo-1626806787461-102c1bfaaea1?auto=format&fit=crop&q=80&w=800" // Real Washer/dryer
-							} else if strings.Contains(modelLower, "range") || strings.Contains(modelLower, "oven") || strings.Contains(modelLower, "stove") || strings.Contains(modelLower, "cooktop") {
-								veh.HeroImage = "https://images.unsplash.com/photo-1590794056226-79ef3a8147e1?auto=format&fit=crop&q=80&w=800" // Real Oven/Stove
-							} else if strings.Contains(modelLower, "dishwasher") {
-								veh.HeroImage = "https://images.unsplash.com/photo-1585837554808-a1179311a2f4?auto=format&fit=crop&q=80&w=800" // Real Dishwasher
-							} else if strings.Contains(modelLower, "tesla") || strings.Contains(modelLower, "car") || strings.Contains(modelLower, "suv") {
-								veh.HeroImage = "https://images.unsplash.com/photo-1617788138017-80ad40651399?auto=format&fit=crop&q=80&w=800" // Tesla/car
+
+							if strings.Contains(prodType, "refrigerator") || strings.Contains(prodType, "fridge") || strings.Contains(modelLower, "refrigerator") || strings.Contains(modelLower, "fridge") {
+								prod.HeroImage = "https://images.unsplash.com/photo-1588854337236-6889d631faa8?auto=format&fit=crop&q=80&w=800" // Real Refrigerator
+							} else if strings.Contains(prodType, "dishwasher") || strings.Contains(modelLower, "dishwasher") {
+								prod.HeroImage = "https://images.unsplash.com/photo-1581578731548-c64695cc6952?auto=format&fit=crop&q=80&w=800" // Real Dishwasher
+							} else if strings.Contains(prodType, "washer") || strings.Contains(prodType, "washing") || strings.Contains(prodType, "dryer") || strings.Contains(modelLower, "washer") || strings.Contains(modelLower, "washing") || strings.Contains(modelLower, "dryer") {
+								prod.HeroImage = "https://images.unsplash.com/photo-1626806787461-102c1bfaaea1?auto=format&fit=crop&q=80&w=800" // Real Washer/dryer
+							} else if strings.Contains(prodType, "range") || strings.Contains(prodType, "oven") || strings.Contains(prodType, "stove") || strings.Contains(prodType, "cooktop") || strings.Contains(prodType, "microwave") || strings.Contains(modelLower, "range") || strings.Contains(modelLower, "oven") || strings.Contains(modelLower, "stove") || strings.Contains(modelLower, "cooktop") || strings.Contains(modelLower, "microwave") {
+								prod.HeroImage = "https://images.unsplash.com/photo-1590794056226-79ef3a8147e1?auto=format&fit=crop&q=80&w=800" // Real Oven/Stove
+							} else if strings.Contains(prodType, "tesla") || strings.Contains(prodType, "car") || strings.Contains(prodType, "suv") || strings.Contains(modelLower, "tesla") || strings.Contains(modelLower, "car") || strings.Contains(modelLower, "suv") {
+								prod.HeroImage = "https://images.unsplash.com/photo-1617788138017-80ad40651399?auto=format&fit=crop&q=80&w=800" // Tesla/car
 							} else {
-								veh.HeroImage = "https://images.unsplash.com/photo-1556910103-1c02745aae4d?auto=format&fit=crop&q=80&w=800" // Default: Modern kitchen
+								prod.HeroImage = "https://images.unsplash.com/photo-1556910103-1c02745aae4d?auto=format&fit=crop&q=80&w=800" // Default: Modern kitchen
 							}
 						}
 
-						if hpVal, ok := spec.EngineSpecs["horsepower"]; ok {
+						if hpVal, ok := spec.Specs["horsepower"]; ok {
 							if hpFloat, ok := hpVal.(float64); ok {
-								veh.Horsepower = int(hpFloat)
+								prod.Horsepower = int(hpFloat)
 							} else if hpInt, ok := hpVal.(int); ok {
-								veh.Horsepower = hpInt
+								prod.Horsepower = hpInt
 							}
 						}
 
@@ -155,22 +167,23 @@ func (s *CompileHTMLStep) Execute(ctx *workflow.Context) (workflow.Result, error
 		}
 
 		if !found {
-			dbVeh := s.getVehicleSpecByID(r.VehicleID)
-			veh = templateVehicleSpec{
-				Model:      dbVeh.Model,
-				BasePrice:  dbVeh.BasePrice,
-				HeroImage:  dbVeh.HeroImage,
-				Seats:      dbVeh.Seats,
-				Horsepower: dbVeh.Horsepower,
-				Features:   dbVeh.Features,
+			dbProd := s.getProductSpecByID(r.ProductID)
+			prod = templateProductSpec{
+				Model:      dbProd.Model,
+				BasePrice:  dbProd.BasePrice,
+				HeroImage:  dbProd.HeroImage,
+				Seats:      dbProd.Seats,
+				Horsepower: dbProd.Horsepower,
+				Capacity:   dbProd.Capacity,
+				Features:   dbProd.Features,
 			}
 		}
 
-		brnd := s.getBrandConfigByModel(veh.Model)
+		brnd := s.getBrandConfigByModel(prod.Model)
 
 		item := recommendationItem{
 			Brand:   brnd,
-			Vehicle: veh,
+			Product: prod,
 			Recommendation: struct {
 				Score        int
 				MatchedRules []string
@@ -262,45 +275,46 @@ func (s *CompileHTMLStep) Execute(ctx *workflow.Context) (workflow.Result, error
 	return outputFilePath, nil
 }
 
-// Struct representing template-friendly vehicle spec
-type templateVehicleSpec struct {
+// Struct representing template-friendly product spec
+type templateProductSpec struct {
 	Model      string
 	BasePrice  string
 	HeroImage  string
 	Seats      int
 	Horsepower int
+	Capacity   string
 	Features   []string
 }
 
-// getVehicleSpecByID mimics querying PostgreSQL spec tables
-func (s *CompileHTMLStep) getVehicleSpecByID(id string) templateVehicleSpec {
+// getProductSpecByID mimics querying spec database tables
+func (s *CompileHTMLStep) getProductSpecByID(id string) templateProductSpec {
 	switch id {
-	case "car_bmw_x3":
-		return templateVehicleSpec{
-			Model:      "BMW X3 M Sport",
-			BasePrice:  "65,000",
-			HeroImage:  "https://images.unsplash.com/photo-1617814076367-b759c7d7e738?auto=format&fit=crop&q=80&w=800",
-			Seats:      5,
-			Horsepower: 248,
-			Features:   []string{"AWD xDrive system", "360 Surround View Camera", "Panoramic Glass Sunroof", "Active Blind Spot Detection", "Sensatec Upholstery", "Harman Kardon Audio"},
+	case "appliance_fridge_samsung":
+		return templateProductSpec{
+			Model:     "Samsung Family Hub Refrigerator",
+			BasePrice: "2,499.00",
+			HeroImage: "https://images.unsplash.com/photo-1588854337236-6889d631faa8?auto=format&fit=crop&q=80&w=800",
+			Seats:     0,
+			Capacity:  "26.5 cu. ft.",
+			Features:  []string{"Wi-Fi Connected Screen", "Triple Cooling System", "Internal Cameras", "Water & Ice Dispenser"},
 		}
-	case "suv_7seater":
-		return templateVehicleSpec{
-			Model:      "Adventure Navigator 7S",
-			BasePrice:  "80,000",
-			HeroImage:  "https://images.unsplash.com/photo-1533473359331-0135ef1b58bf?auto=format&fit=crop&q=80&w=800",
-			Seats:      7,
-			Horsepower: 320,
-			Features:   []string{"Dynamic 4WD Mode Selector", "High Ground Clearance suspension", "Integrated Roof Rails & Basket", "Fold-Flat Third Row seats", "Heavy Duty Tow Package", "Off-Road Underbody Shields"},
+	case "appliance_washer_lg":
+		return templateProductSpec{
+			Model:     "LG TurboWash Washing Machine",
+			BasePrice: "899.00",
+			HeroImage: "https://images.unsplash.com/photo-1626806787461-102c1bfaaea1?auto=format&fit=crop&q=80&w=800",
+			Seats:     0,
+			Capacity:  "5.0 cu. ft.",
+			Features:  []string{"AI DD Smart Fabric Care", "TurboWash 360", "Steam Technology", "ThinQ Wi-Fi Control"},
 		}
 	default:
-		return templateVehicleSpec{
-			Model:      "Premium Touring Sedan",
-			BasePrice:  "43,000",
-			HeroImage:  "https://images.unsplash.com/photo-1555215695-3004980ad54e?auto=format&fit=crop&q=80&w=800",
-			Seats:      5,
-			Horsepower: 180,
-			Features:   []string{"Front Wheel Drive traction control", "Acoustic Double-Pane windows", "Smart cruise control", "Heated front and rear seats", "Digital driver display cockpits"},
+		return templateProductSpec{
+			Model:     "Bosch 800 Series Dishwasher",
+			BasePrice: "1,299.00",
+			HeroImage: "https://images.unsplash.com/photo-1581578731548-c64695cc6952?auto=format&fit=crop&q=80&w=800",
+			Seats:     0,
+			Capacity:  "16 Place Settings",
+			Features:  []string{"CrystalDry Technology", "Whisper Quiet 42 dBA", "Flexible 3rd Rack", "Home Connect Smart Control"},
 		}
 	}
 }

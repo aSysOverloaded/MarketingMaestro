@@ -146,7 +146,7 @@ func main() {
 
 		// 4. Instantiate Steps & Declare Workflow
 		stepProfile := steps.NewUserProfileStep()
-		stepRecommend := steps.NewProductRecommenderStep(recommendation.NewVehicleMatcher())
+		stepRecommend := steps.NewProductRecommenderStep(recommendation.NewProductMatcher())
 		stepPlanner := steps.NewPlannerStep()
 		stepWriter := steps.NewWriterStep()
 		stepCritic := steps.NewCriticStep()

@@ -74,8 +74,8 @@
                         <div class="flex items-center space-x-3">
                             <span class="h-6 w-6 rounded-full bg-blue-100 text-blue-800 font-bold text-xs flex items-center justify-center">{{add $index 1}}</span>
                             <div>
-                                <h4 class="font-bold text-gray-800 text-sm">{{$item.Vehicle.Model}}</h4>
-                                <p class="text-xs text-gray-400">Starting from ${{$item.Vehicle.BasePrice}}</p>
+                                <h4 class="font-bold text-gray-800 text-sm">{{$item.Product.Model}}</h4>
+                                <p class="text-xs text-gray-400">Starting from ${{$item.Product.BasePrice}}</p>
                             </div>
                         </div>
                         <div class="text-right">
@@ -103,7 +103,7 @@
         <!-- Header -->
         <div class="flex justify-between items-center border-b border-gray-100 pb-4">
             <div class="flex items-center space-x-2">
-                <span class="font-bold text-sm text-gray-800 uppercase tracking-widest">{{$item.Vehicle.Model}}</span>
+                <span class="font-bold text-sm text-gray-800 uppercase tracking-widest">{{$item.Product.Model}}</span>
                 <span class="text-xs px-2 py-0.5 rounded-full text-white font-bold" style="background-color: {{$item.Brand.PrimaryColor}};">Option {{add $index 1}}</span>
             </div>
             <span class="text-xs font-bold text-gray-500 uppercase tracking-widest">Match Score: {{$item.Recommendation.Score}}%</span>
@@ -112,11 +112,11 @@
         <div class="my-auto space-y-6">
             <!-- Hero image -->
             <div class="relative rounded-2xl overflow-hidden shadow-lg h-64 bg-gray-900">
-                <div class="absolute inset-0 bg-cover bg-center" style="background-image: url('{{$item.Vehicle.HeroImage}}');"></div>
+                <img class="absolute inset-0 w-full h-full object-cover" src="{{$item.Product.HeroImage}}" alt="{{$item.Product.Model}}">
                 <div class="absolute inset-0 bg-gradient-to-t from-black/60 to-transparent"></div>
                 <div class="absolute bottom-4 left-6 text-white">
                     <span class="text-xs text-gray-300 font-medium tracking-wide">Dynamic Feature Spotlight</span>
-                    <h3 class="text-2xl font-bold">{{$item.Vehicle.Model}}</h3>
+                    <h3 class="text-2xl font-bold">{{$item.Product.Model}}</h3>
                 </div>
             </div>
 
@@ -142,12 +142,12 @@
             <div class="grid grid-cols-3 gap-4">
                 <div class="bg-gray-50 p-3 rounded-xl border border-gray-100 text-center">
                     <span class="text-[10px] text-gray-400 font-semibold uppercase tracking-wider block">Estimated Price</span>
-                    <span class="text-sm font-bold text-gray-800">${{$item.Vehicle.BasePrice}}</span>
+                    <span class="text-sm font-bold text-gray-800">${{$item.Product.BasePrice}}</span>
                 </div>
-                {{if gt $item.Vehicle.Horsepower 0}}
+                {{if gt $item.Product.Horsepower 0}}
                 <div class="bg-gray-50 p-3 rounded-xl border border-gray-100 text-center">
                     <span class="text-[10px] text-gray-400 font-semibold uppercase tracking-wider block">Horsepower</span>
-                    <span class="text-sm font-bold text-gray-800">{{$item.Vehicle.Horsepower}} HP</span>
+                    <span class="text-sm font-bold text-gray-800">{{$item.Product.Horsepower}} HP</span>
                 </div>
                 {{else}}
                 <div class="bg-gray-50 p-3 rounded-xl border border-gray-100 text-center">
@@ -155,10 +155,10 @@
                     <span class="text-sm font-bold text-gray-800 text-green-600">Available</span>
                 </div>
                 {{end}}
-                {{if gt $item.Vehicle.Seats 0}}
+                {{if $item.Product.Capacity}}
                 <div class="bg-gray-50 p-3 rounded-xl border border-gray-100 text-center">
                     <span class="text-[10px] text-gray-400 font-semibold uppercase tracking-wider block">Capacity</span>
-                    <span class="text-sm font-bold text-gray-800">{{$item.Vehicle.Seats}} Seats</span>
+                    <span class="text-sm font-bold text-gray-800">{{$item.Product.Capacity}}</span>
                 </div>
                 {{else}}
                 <div class="bg-gray-50 p-3 rounded-xl border border-gray-100 text-center">
@@ -172,7 +172,7 @@
             <div class="space-y-2">
                 <h4 class="font-extrabold text-xs text-gray-900 uppercase tracking-widest">Key Product Highlights</h4>
                 <div class="grid grid-cols-2 gap-2 text-xs text-gray-600">
-                    {{range $item.Vehicle.Features}}
+                    {{range $item.Product.Features}}
                     <div class="flex items-center space-x-2">
                         <span class="h-1.5 w-1.5 rounded-full" style="background-color: {{$item.Brand.PrimaryColor}};"></span>
                         <span>{{.}}</span>
@@ -183,7 +183,7 @@
 
             <!-- 4. Dynamic CTA -->
             <div class="rounded-xl p-4 text-white text-center space-y-2.5 shadow-md" style="background: linear-gradient(135deg, {{$item.Brand.PrimaryColor}} 0%, {{$item.Brand.SecondaryColor}} 100%);">
-                <h4 class="font-bold text-sm">Interested in the {{$item.Vehicle.Model}}?</h4>
+                <h4 class="font-bold text-sm">Interested in the {{$item.Product.Model}}?</h4>
                 <div class="pt-0.5">
                     <a href="#" class="inline-block bg-white font-bold px-4 py-1.5 rounded-lg text-xs tracking-wider uppercase shadow-sm hover:shadow-md transition-all duration-300" style="color: {{$item.Brand.PrimaryColor}};">
                         Schedule Demo / View Details

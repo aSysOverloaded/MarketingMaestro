@@ -30,7 +30,7 @@ func TestFullMVPWorkflowExecution(t *testing.T) {
 
 	// 2. Initialize Steps
 	stepProfile := NewUserProfileStep()
-	stepRecommend := NewProductRecommenderStep(recommendation.NewVehicleMatcher())
+	stepRecommend := NewProductRecommenderStep(recommendation.NewProductMatcher())
 	stepCompile := NewCompileHTMLStep(templatesDir, tempHtmlDir)
 	stepRender := NewPDFRenderStep(tempPdfDir)
 	stepEmail := NewEmailDispatchStep(tempEmailDir)

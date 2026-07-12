@@ -106,7 +106,7 @@
 
                 <!-- Dropzone Section -->
                 <div class="space-y-2">
-                    <label class="text-xs font-bold uppercase tracking-wider text-slate-400">2. Upload Vehicle PDF Brochure</label>
+                    <label class="text-xs font-bold uppercase tracking-wider text-slate-400">2. Upload Product PDF Brochure</label>
                     <div id="dropzone" class="border-2 border-dashed border-slate-700 rounded-2xl p-6 text-center cursor-pointer hover:border-slate-500 transition-all duration-300 flex flex-col items-center justify-center space-y-2 bg-slate-900 bg-opacity-20">
                         <svg class="h-10 w-10 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
@@ -315,7 +315,7 @@
                                 <div>
                                     <div class="flex items-center space-x-2">
                                         <span class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-800 text-slate-300">Option ${index + 1}</span>
-                                        <h4 class="text-lg font-bold text-white">${item.vehicle_id.replace('car_', '').replace('suv_', '').replace('sedan_', '').toUpperCase()}</h4>
+                                        <h4 class="text-lg font-bold text-white">${item.product_id.replace('appliance_', '').replace('car_', '').replace('suv_', '').replace('sedan_', '').toUpperCase()}</h4>
                                     </div>
                                     <p class="text-xs text-slate-400 italic mt-1">"${item.explanation}"</p>
                                 </div>

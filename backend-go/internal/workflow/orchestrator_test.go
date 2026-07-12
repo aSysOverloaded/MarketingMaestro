@@ -61,7 +61,7 @@ func TestWorkflowSuccessSequencing(t *testing.T) {
 			mu.Unlock()
 			return RecommendationResult{
 				RecommendationID: "rec_456",
-				VehicleID:        "car_789",
+				ProductID:        "product_789",
 				Score:            95,
 			}, nil
 		},
@@ -176,7 +176,7 @@ func TestWorkflowIdempotency(t *testing.T) {
 			step2ExecutionCount++
 			return RecommendationResult{
 				RecommendationID: "rec_456",
-				VehicleID:        "car_789",
+				ProductID:        "product_789",
 			}, nil
 		},
 	}

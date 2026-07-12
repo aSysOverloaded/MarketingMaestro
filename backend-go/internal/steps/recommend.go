@@ -95,7 +95,7 @@ func (s *ProductRecommenderStep) Execute(ctx *workflow.Context) (workflow.Result
 	if len(candidates) == 0 {
 		// Check if a custom uploaded catalog array is provided in context (legacy/simulation fallback)
 		if catalogRaw, ok := ctx.State.StepOutputs["UploadedCatalog"]; ok {
-			if catalogList, ok := catalogRaw.([]recommendation.Vehicle); ok && len(catalogList) > 0 {
+			if catalogList, ok := catalogRaw.([]recommendation.Product); ok && len(catalogList) > 0 {
 				for _, v := range catalogList {
 					candidates = append(candidates, v)
 				}
@@ -103,48 +103,48 @@ func (s *ProductRecommenderStep) Execute(ctx *workflow.Context) (workflow.Result
 		}
 	}
 
-	// Check if a custom uploaded vehicle is provided in context
+	// Check if a custom uploaded product is provided in context
 	if uploadedRaw, ok := ctx.State.StepOutputs["UploadedVehicle"]; ok {
-		if uploadedVehicle, ok := uploadedRaw.(recommendation.Vehicle); ok {
-			candidates = append(candidates, uploadedVehicle)
-		} else if uploadedVehiclePtr, ok := uploadedRaw.(*recommendation.Vehicle); ok && uploadedVehiclePtr != nil {
-			candidates = append(candidates, *uploadedVehiclePtr)
+		if uploadedProduct, ok := uploadedRaw.(recommendation.Product); ok {
+			candidates = append(candidates, uploadedProduct)
+		} else if uploadedProductPtr, ok := uploadedRaw.(*recommendation.Product); ok && uploadedProductPtr != nil {
+			candidates = append(candidates, *uploadedProductPtr)
 		}
 	}
 
 	// Fallback to static catalog DB if no custom products are uploaded
 	if len(candidates) == 0 {
 		candidates = []recommendation.Candidate{
-			recommendation.Vehicle{
+			recommendation.Product{
 				ID:        "appliance_fridge_samsung",
 				Model:     "Samsung Family Hub Refrigerator",
 				BasePrice: 2499,
 				Features:  []string{"Wi-Fi Connected Screen", "Triple Cooling System", "Internal Cameras", "Water & Ice Dispenser"},
-				EngineSpecs: map[string]interface{}{
+				Specs: map[string]interface{}{
 					"seats":    0,
 					"type":     "Refrigerator",
 					"capacity": "26.5 cu. ft.",
 				},
 				Colors: []string{"Stainless Steel", "Black Stainless Steel"},
 			},
-			recommendation.Vehicle{
+			recommendation.Product{
 				ID:        "appliance_washer_lg",
 				Model:     "LG TurboWash Washing Machine",
 				BasePrice: 899,
 				Features:  []string{"AI DD Smart Fabric Care", "TurboWash 360", "Steam Technology", "ThinQ Wi-Fi Control"},
-				EngineSpecs: map[string]interface{}{
+				Specs: map[string]interface{}{
 					"seats":    0,
 					"type":     "Washing Machine",
 					"capacity": "5.0 cu. ft.",
 				},
 				Colors: []string{"Graphite", "White"},
 			},
-			recommendation.Vehicle{
+			recommendation.Product{
 				ID:        "appliance_dishwasher_bosch",
 				Model:     "Bosch 800 Series Dishwasher",
 				BasePrice: 1299,
 				Features:  []string{"CrystalDry Technology", "Whisper Quiet 42 dBA", "Flexible 3rd Rack", "Home Connect Smart Control"},
-				EngineSpecs: map[string]interface{}{
+				Specs: map[string]interface{}{
 					"seats":    0,
 					"type":     "Dishwasher",
 					"capacity": "16 Place Settings",
@@ -184,14 +184,14 @@ Respond with a JSON array containing precisely these objects (ordered by score d
 [
   {
     "recommendation_id": "rec_job_%s_1",
-    "vehicle_id": "candidate_id_here",
+    "product_id": "candidate_id_here",
     "score": 95,
     "matched_rules": ["Rule reason 1", "Rule reason 2"],
     "explanation": "Brief explanation statement."
   },
   {
     "recommendation_id": "rec_job_%s_2",
-    "vehicle_id": "candidate_id_here",
+    "product_id": "candidate_id_here",
     "score": 85,
     "matched_rules": ["Rule reason 1", "Rule reason 2"],
     "explanation": "Brief explanation statement."
@@ -212,11 +212,11 @@ Do not output any markdown formatting or commentary. Just output the raw JSON ar
 	}
 
 	// Find full spec structs for the selected recommendations and store them in context
-	var selectedSpecs []recommendation.Vehicle
+	var selectedSpecs []recommendation.Product
 	for _, rank := range ranks {
 		for _, cand := range candidates {
-			if v, ok := cand.(recommendation.Vehicle); ok && v.ID == rank.VehicleID {
-				selectedSpecs = append(selectedSpecs, v)
+			if p, ok := cand.(recommendation.Product); ok && p.ID == rank.ProductID {
+				selectedSpecs = append(selectedSpecs, p)
 			}
 		}
 	}
@@ -287,7 +287,7 @@ For each item, respond with a JSON object matching this structure:
   "model": "Full Product Model Name (e.g. Samsung Family Hub Refrigerator)",
   "base_price": 2499.0,
   "features": ["Feature 1", "Feature 2", "Feature 3", ...],
-  "engine_specs": {
+  "specs": {
     "type": "Product Category (e.g. Refrigerator, Washer, Sedan)",
     "capacity": "Specifications (e.g. 26 cu. ft., 5.0 cu. ft., or 5 seats)",
     "power": "Power specs or Horsepower if applicable"
@@ -302,15 +302,7 @@ Matched Pages Content:
 
 Respond with a JSON array containing these objects. Do not output any markdown formatting or commentary. Just output the raw JSON array.`, matchedText)
 
-	var parsedItems []struct {
-		ID          string                 `json:"id"`
-		Model       string                 `json:"model"`
-		BasePrice   float64                `json:"base_price"`
-		Features    []string               `json:"features"`
-		EngineSpecs map[string]interface{} `json:"engine_specs"`
-		Colors      []string               `json:"colors"`
-		PageNumber  int                    `json:"page_number"`
-	}
+	var parsedItems []recommendation.Product
 
 	err = workflow.CallGemini(ctx, prompt, &parsedItems)
 	if err != nil {
@@ -318,25 +310,16 @@ Respond with a JSON array containing these objects. Do not output any markdown f
 	}
 
 	var candidates []recommendation.Candidate
-	for _, parsed := range parsedItems {
-		v := recommendation.Vehicle{
-			ID:          parsed.ID,
-			Model:       parsed.Model,
-			BasePrice:   parsed.BasePrice,
-			Features:    parsed.Features,
-			EngineSpecs: parsed.EngineSpecs,
-			Colors:      parsed.Colors,
-		}
-
+	for _, p := range parsedItems {
 		// Lookup original matching RAG hit to copy its page-extracted image
 		for _, match := range searchResp.Matches {
-			if match.PageNumber == parsed.PageNumber && len(match.Images) > 0 {
-				v.HeroImage = match.Images[0]
+			if match.PageNumber == p.PageNumber && len(match.Images) > 0 {
+				p.HeroImage = match.Images[0]
 				break
 			}
 		}
 
-		candidates = append(candidates, v)
+		candidates = append(candidates, p)
 	}
 	return candidates, nil
 }

@@ -6,9 +6,12 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"mime/multipart"
 	"net/http"
 	"os"
+	"reflect"
+	"strings"
 	"time"
 
 	"marketing-agent/internal/recommendation"
@@ -49,14 +52,44 @@ type GeminiResponse struct {
 	} `json:"candidates"`
 }
 
+type OpenAIChatRequest struct {
+	Model          string                 `json:"model"`
+	Messages       []OpenAIMessage        `json:"messages"`
+	ResponseFormat map[string]interface{} `json:"response_format,omitempty"`
+}
+
+type OpenAIMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+type OpenAIResponse struct {
+	Choices []struct {
+		Message struct {
+			Content string `json:"content"`
+		} `json:"message"`
+	} `json:"choices"`
+}
+
 func getAPIKey() string {
 	return os.Getenv("GEMINI_API_KEY")
 }
 
-// CallGemini calls the Gemini API to get a structured JSON response unmarshalled into target
+// CallGemini calls the Gemini API or a configured OpenAI-compatible API to get a structured JSON response unmarshalled into target
 func CallGemini(ctx *Context, prompt string, target interface{}) error {
-	apiKey := getAPIKey()
-	if apiKey == "" {
+	apiUrl := os.Getenv("LLM_API_URL")
+	apiKey := os.Getenv("LLM_API_KEY")
+	model := os.Getenv("LLM_MODEL")
+
+	if apiUrl != "" && apiKey != "" {
+		if model == "" {
+			model = "qwen/qwen-2.5-72b-instruct:free" // Default free OpenRouter model
+		}
+		return CallOpenAICompatible(ctx, apiUrl, apiKey, model, prompt, target)
+	}
+
+	geminiApiKey := getAPIKey()
+	if geminiApiKey == "" {
 		log.Printf("[TraceID: %s] [JobID: %s] [Gemini] GEMINI_API_KEY is empty. Falling back to local simulation.", ctx.TraceID, ctx.JobID)
 		return simulateFallback(prompt, target)
 	}
@@ -81,27 +114,51 @@ func CallGemini(ctx *Context, prompt string, target interface{}) error {
 		return fmt.Errorf("failed to marshal Gemini request body: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonData))
-	if err != nil {
-		return fmt.Errorf("failed to create http request for Gemini: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
+	var resp *http.Response
+	var bodyBytes []byte
+	maxRetries := 5
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		log.Printf("[TraceID: %s] [JobID: %s] [Gemini] [WARNING] Network connection to Gemini failed: %v. Falling back to local simulation.", ctx.TraceID, ctx.JobID, err)
-		return simulateFallback(prompt, target)
-	}
-	defer resp.Body.Close()
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonData))
+		if err != nil {
+			return fmt.Errorf("failed to create http request for Gemini: %w", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
 
-	bodyBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("failed to read response body: %w", err)
+		client := &http.Client{}
+		resp, err = client.Do(req)
+		if err != nil {
+			log.Printf("[TraceID: %s] [JobID: %s] [Gemini] [WARNING] Network connection failed (attempt %d): %v", ctx.TraceID, ctx.JobID, attempt+1, err)
+			time.Sleep(3 * time.Second)
+			continue
+		}
+
+		bodyBytes, err = io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			return fmt.Errorf("failed to read response body: %w", err)
+		}
+
+		if resp.StatusCode == http.StatusOK {
+			break
+		}
+
+		if resp.StatusCode == 429 || resp.StatusCode == 503 {
+			retryDelay := time.Duration(3*math.Pow(2, float64(attempt))) * time.Second
+			if retryDelay > 30*time.Second {
+				retryDelay = 30 * time.Second
+			}
+			log.Printf("[TraceID: %s] [JobID: %s] [Gemini] [WARNING] Gemini request returned status %d. Retrying in %v... (attempt %d/%d)", ctx.TraceID, ctx.JobID, resp.StatusCode, retryDelay, attempt+1, maxRetries)
+			time.Sleep(retryDelay)
+			continue
+		} else {
+			log.Printf("[TraceID: %s] [JobID: %s] [Gemini] [WARNING] Gemini request failed (Status: %d). Falling back to local simulation. Error body: %s", ctx.TraceID, ctx.JobID, resp.StatusCode, string(bodyBytes))
+			return simulateFallback(prompt, target)
+		}
 	}
 
-	if resp.StatusCode != http.StatusOK {
-		log.Printf("[TraceID: %s] [JobID: %s] [Gemini] [WARNING] Gemini request failed (Status: %d). Falling back to local simulation. Error body: %s", ctx.TraceID, ctx.JobID, resp.StatusCode, string(bodyBytes))
+	if resp == nil || resp.StatusCode != http.StatusOK {
+		log.Printf("[TraceID: %s] [JobID: %s] [Gemini] [WARNING] Gemini retries exhausted. Falling back to local simulation.", ctx.TraceID, ctx.JobID)
 		return simulateFallback(prompt, target)
 	}
 
@@ -122,8 +179,129 @@ func CallGemini(ctx *Context, prompt string, target interface{}) error {
 	return nil
 }
 
+// CallOpenAICompatible executes structured chat completions queries on standard OpenAI-compatible endpoints
+func CallOpenAICompatible(ctx *Context, apiURL, apiKey, model, prompt string, target interface{}) error {
+	url := fmt.Sprintf("%s/chat/completions", strings.TrimSuffix(apiURL, "/"))
+	
+	reqBody := OpenAIChatRequest{
+		Model: model,
+		Messages: []OpenAIMessage{
+			{Role: "user", Content: prompt},
+		},
+		ResponseFormat: map[string]interface{}{
+			"type": "json_object",
+		},
+	}
+
+	jsonData, err := json.Marshal(reqBody)
+	if err != nil {
+		return fmt.Errorf("failed to marshal OpenAI request body: %w", err)
+	}
+
+	var resp *http.Response
+	var bodyBytes []byte
+	maxRetries := 5
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonData))
+		if err != nil {
+			return fmt.Errorf("failed to create http request for OpenAI: %w", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", apiKey))
+
+		client := &http.Client{}
+		resp, err = client.Do(req)
+		if err != nil {
+			log.Printf("[TraceID: %s] [JobID: %s] [OpenAI] [WARNING] Network connection failed (attempt %d): %v", ctx.TraceID, ctx.JobID, attempt+1, err)
+			time.Sleep(3 * time.Second)
+			continue
+		}
+
+		bodyBytes, err = io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			return fmt.Errorf("failed to read response body: %w", err)
+		}
+
+		if resp.StatusCode == http.StatusOK {
+			break
+		}
+
+		if resp.StatusCode == 429 || resp.StatusCode == 503 {
+			retryDelay := time.Duration(3*math.Pow(2, float64(attempt))) * time.Second
+			if retryDelay > 30*time.Second {
+				retryDelay = 30 * time.Second
+			}
+			log.Printf("[TraceID: %s] [JobID: %s] [OpenAI] [WARNING] OpenAI request returned status %d. Retrying in %v... (attempt %d/%d)", ctx.TraceID, ctx.JobID, resp.StatusCode, retryDelay, attempt+1, maxRetries)
+			time.Sleep(retryDelay)
+			continue
+		} else {
+			log.Printf("[TraceID: %s] [JobID: %s] [OpenAI] [WARNING] request failed (Status: %d). Error body: %s. Falling back to local simulation.", ctx.TraceID, ctx.JobID, resp.StatusCode, string(bodyBytes))
+			return simulateFallback(prompt, target)
+		}
+	}
+
+	if resp == nil || resp.StatusCode != http.StatusOK {
+		log.Printf("[TraceID: %s] [JobID: %s] [OpenAI] [WARNING] retries exhausted. Falling back to local simulation.", ctx.TraceID, ctx.JobID)
+		return simulateFallback(prompt, target)
+	}
+
+	var openAIResp OpenAIResponse
+	if err := json.Unmarshal(bodyBytes, &openAIResp); err != nil {
+		return fmt.Errorf("failed to unmarshal OpenAI API outer response: %w", err)
+	}
+
+	if len(openAIResp.Choices) == 0 {
+		return fmt.Errorf("OpenAI API response contained no choices: %s", string(bodyBytes))
+	}
+
+	responseText := openAIResp.Choices[0].Message.Content
+	cleanText := responseText
+	if strings.Contains(cleanText, "```json") {
+		cleanText = strings.Split(cleanText, "```json")[1]
+		cleanText = strings.Split(cleanText, "```")[0]
+	}
+	cleanText = strings.TrimSpace(cleanText)
+
+	// If target is a slice, but model returned an outer object wrapping it (common for OpenAI json_object mode)
+	if strings.HasPrefix(cleanText, "{") {
+		var outerMap map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(cleanText), &outerMap); err == nil {
+			for _, val := range outerMap {
+				trimmedVal := strings.TrimSpace(string(val))
+				if strings.HasPrefix(trimmedVal, "[") {
+					if err := json.Unmarshal(val, target); err == nil {
+						return nil // Successfully parsed wrapped array!
+					}
+				}
+			}
+		}
+
+		// Handle case where target is a slice but API returned a single JSON object (e.g. only one product matched)
+		targetVal := reflect.ValueOf(target)
+		if targetVal.Kind() == reflect.Ptr && targetVal.Elem().Kind() == reflect.Slice {
+			sliceType := targetVal.Elem().Type()
+			elemType := sliceType.Elem()
+			newElem := reflect.New(elemType)
+			if err := json.Unmarshal([]byte(cleanText), newElem.Interface()); err == nil {
+				newSlice := reflect.MakeSlice(sliceType, 1, 1)
+				newSlice.Index(0).Set(newElem.Elem())
+				targetVal.Elem().Set(newSlice)
+				return nil
+			}
+		}
+	}
+
+	if err := json.Unmarshal([]byte(cleanText), target); err != nil {
+		return fmt.Errorf("failed to parse structured JSON response from OpenAI into target: %w. Response text was: %s", err, responseText)
+	}
+
+	return nil
+}
+
 // ParsePDFBrochure uploads a PDF brochure to the Python sidecar's Qdrant index.
-func ParsePDFBrochure(ctx *Context, pdfBytes []byte) ([]recommendation.Vehicle, error) {
+func ParsePDFBrochure(ctx *Context, pdfBytes []byte) ([]recommendation.Product, error) {
 	pythonUrl := os.Getenv("PYTHON_SERVICE_URL")
 	if pythonUrl == "" {
 		pythonUrl = "http://localhost:8000"
@@ -167,14 +345,14 @@ func ParsePDFBrochure(ctx *Context, pdfBytes []byte) ([]recommendation.Vehicle, 
 	return nil, nil
 }
 
-func runLocalPDFMockFallback() ([]recommendation.Vehicle, error) {
-	return []recommendation.Vehicle{
+func runLocalPDFMockFallback() ([]recommendation.Product, error) {
+	return []recommendation.Product{
 		{
 			ID:        "appliance_fridge_samsung",
 			Model:     "Samsung Family Hub Refrigerator",
 			BasePrice: 2499,
 			Features:  []string{"Wi-Fi Connected Screen", "Triple Cooling System", "Internal Cameras", "Water & Ice Dispenser"},
-			EngineSpecs: map[string]interface{}{
+			Specs: map[string]interface{}{
 				"seats":    0,
 				"type":     "Refrigerator",
 				"capacity": "26.5 cu. ft.",
@@ -186,7 +364,7 @@ func runLocalPDFMockFallback() ([]recommendation.Vehicle, error) {
 			Model:     "LG TurboWash Washing Machine",
 			BasePrice: 899,
 			Features:  []string{"AI DD Smart Fabric Care", "TurboWash 360", "Steam Technology", "ThinQ Wi-Fi Control"},
-			EngineSpecs: map[string]interface{}{
+			Specs: map[string]interface{}{
 				"seats":    0,
 				"type":     "Washing Machine",
 				"capacity": "5.0 cu. ft.",
@@ -196,13 +374,11 @@ func runLocalPDFMockFallback() ([]recommendation.Vehicle, error) {
 	}, nil
 }
 
-// simulateFallback parses the prompt and generates static/mock response data when API key is missing
+// simulateFallback parses the prompt and generates static/mock response data when API key is missing or rate limited
 func simulateFallback(prompt string, target interface{}) error {
-	var mockJSON string
-
 	switch t := target.(type) {
 	case *UserProfileResult:
-		mockJSON = `{
+		mockJSON := `{
 			"user_profile_id": "simulated_job_profile",
 			"segment": "Adventure",
 			"budget_tier": "Premium",
@@ -214,37 +390,150 @@ func simulateFallback(prompt string, target interface{}) error {
 				"location": "Seattle, WA"
 			}
 		}`
+		if err := json.Unmarshal([]byte(mockJSON), target); err != nil {
+			return fmt.Errorf("failed to unmarshal simulated fallback profile: %w", err)
+		}
+		return nil
+
 	case *[]RecommendationResult:
-		mockJSON = `[
+		// Attempt to extract the IDs of candidates from the prompt catalog dynamically
+		var recs []RecommendationResult
+		var parsedIds []string
+		idx := 0
+		for {
+			idPos := strings.Index(prompt[idx:], `"id":`)
+			if idPos == -1 {
+				break
+			}
+			startIdx := idx + idPos + 5
+			// find opening quote of the value
+			valStart := strings.Index(prompt[startIdx:], `"`)
+			if valStart == -1 {
+				break
+			}
+			valStartIdx := startIdx + valStart + 1
+			valEnd := strings.Index(prompt[valStartIdx:], `"`)
+			if valEnd == -1 {
+				break
+			}
+			val := prompt[valStartIdx : valStartIdx+valEnd]
+			parsedIds = append(parsedIds, val)
+			idx = valStartIdx + valEnd
+		}
+
+		if len(parsedIds) > 0 {
+			for i, id := range parsedIds {
+				if i >= 2 { // Limit to top 2 options
+					break
+				}
+				recs = append(recs, RecommendationResult{
+					RecommendationID: fmt.Sprintf("rec_job_simulated_%d", i+1),
+					ProductID:        id,
+					Score:            95 - i*7,
+					MatchedRules: []string{
+						"Demographic Alignment (Dynamic features fit household specifications)",
+						"Budget Matches Guideline Limits",
+					},
+					Explanation: fmt.Sprintf("Dynamic fallback recommendation for product ID: %s.", id),
+				})
+			}
+			*t = recs
+			return nil
+		}
+
+		// Fallback to static mock if no catalog found in prompt
+		mockJSON := `[
 			{
 				"recommendation_id": "rec_job_simulated_1",
-				"vehicle_id": "appliance_fridge_samsung",
+				"product_id": "appliance_fridge_samsung",
 				"score": 95,
 				"matched_rules": [
 					"Budget Fits (Fits within premium household guidelines)",
-					"Optimal Utility (Perfect capacity for family of 4)",
-					"Feature Match (Wi-Fi screen matches smart home interests)"
+					"Optimal Utility (Perfect capacity for family of 4)"
 				],
-				"explanation": "Simulated recommendation of Samsung Family Hub as it matches your family size and smart home preferences."
-			},
-			{
-				"recommendation_id": "rec_job_simulated_2",
-				"vehicle_id": "appliance_washer_lg",
-				"score": 88,
-				"matched_rules": [
-					"Budget Fits (Well under maximum budget)",
-					"Optimal Utility (High capacity washing for family of 4)"
-				],
-				"explanation": "Simulated recommendation of LG TurboWash as it handles large family laundry loads efficiently."
+				"explanation": "Simulated recommendation of Samsung Family Hub Refrigerator."
 			}
 		]`
+		return json.Unmarshal([]byte(mockJSON), target)
+
+	case *[]recommendation.Product:
+		// Attempt to dynamically parse matching pages and text from the RAG search prompt content
+		var products []recommendation.Product
+		idx := 0
+		for {
+			pagePos := strings.Index(prompt[idx:], "--- PAGE ")
+			if pagePos == -1 {
+				break
+			}
+			startIdx := idx + pagePos
+			endIdx := strings.Index(prompt[startIdx:], " ---")
+			if endIdx == -1 {
+				break
+			}
+			
+			// Extract page number
+			pageStr := prompt[startIdx+9 : startIdx+endIdx]
+			var pageNum int
+			_, fmtErr := fmt.Sscanf(pageStr, "%d", &pageNum)
+			if fmtErr == nil {
+				// Find next "--- PAGE " or end of prompt to bound the content
+				contentStart := startIdx + endIdx + 4
+				contentEnd := len(prompt)
+				nextPagePos := strings.Index(prompt[contentStart:], "--- PAGE ")
+				if nextPagePos != -1 {
+					contentEnd = contentStart + nextPagePos
+				}
+				pageContent := prompt[contentStart:contentEnd]
+				
+				// Extract first non-empty line as model name
+				lines := strings.Split(pageContent, "\n")
+				modelName := fmt.Sprintf("Dynamic Page %d Item", pageNum)
+				for _, line := range lines {
+					cleaned := strings.Trim(line, " \t\r\n*#•-")
+					if len(cleaned) > 5 && len(cleaned) < 80 {
+						// Clean up brand names if present or keep clean title
+						modelName = cleaned
+						break
+					}
+				}
+				
+				products = append(products, recommendation.Product{
+					ID:          fmt.Sprintf("appliance_dynamic_page_%d", pageNum),
+					Model:       modelName,
+					BasePrice:   1499.0,
+					PageNumber:  pageNum,
+					Features:    []string{"Smart dynamic utility", "Premium quality & design", "Energy efficient operation"},
+					Specs:       map[string]interface{}{"type": "Appliance", "capacity": "Standard"},
+					Colors:      []string{"Premium Steel", "Midnight Black"},
+				})
+			}
+			idx = startIdx + endIdx + 4
+		}
+
+		if len(products) > 0 {
+			*t = products
+			return nil
+		}
+
+		// Fallback to static mock if no pages parsed from prompt
+		mockJSON := `[
+			{
+				"id": "appliance_fridge_samsung",
+				"model": "Samsung Family Hub Refrigerator",
+				"base_price": 2499,
+				"features": ["Wi-Fi Connected Screen", "Triple Cooling System", "Water & Ice Dispenser"],
+				"specs": {
+					"seats": 0,
+					"type": "Refrigerator",
+					"capacity": "26.5 cu. ft."
+				},
+				"colors": ["Stainless Steel", "Black Stainless Steel"],
+				"page_number": 3
+			}
+		]`
+		return json.Unmarshal([]byte(mockJSON), target)
+
 	default:
 		return fmt.Errorf("unsupported fallback simulation type: %T", t)
 	}
-
-	if err := json.Unmarshal([]byte(mockJSON), target); err != nil {
-		return fmt.Errorf("failed to unmarshal simulated fallback data: %w", err)
-	}
-
-	return nil
 }

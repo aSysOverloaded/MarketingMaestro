@@ -84,7 +84,7 @@ type UserProfileResult struct {
 
 type RecommendationResult struct {
 	RecommendationID string   `json:"recommendation_id"`
-	VehicleID        string   `json:"vehicle_id"`
+	ProductID        string   `json:"product_id"`
 	Score            int      `json:"score"`
 	MatchedRules     []string `json:"matched_rules"`
 	Explanation      string   `json:"explanation"`

@@ -37,9 +37,9 @@ func (s *CriticStep) Execute(ctx *workflow.Context) (workflow.Result, error) {
 		}
 	}
 
-	var candidate recommendation.Vehicle
+	var candidate recommendation.Product
 	if specsRaw, ok := ctx.State.StepOutputs["ProductRecommenderStep_Specs"]; ok {
-		if specs, ok := specsRaw.([]recommendation.Vehicle); ok && len(specs) > 0 {
+		if specs, ok := specsRaw.([]recommendation.Product); ok && len(specs) > 0 {
 			candidate = specs[0]
 		}
 	}

@@ -46,9 +46,9 @@ func (s *WriterStep) Execute(ctx *workflow.Context) (workflow.Result, error) {
 		}
 	}
 
-	var candidate recommendation.Vehicle
+	var candidate recommendation.Product
 	if specsRaw, ok := ctx.State.StepOutputs["ProductRecommenderStep_Specs"]; ok {
-		if specs, ok := specsRaw.([]recommendation.Vehicle); ok && len(specs) > 0 {
+		if specs, ok := specsRaw.([]recommendation.Product); ok && len(specs) > 0 {
 			candidate = specs[0]
 		}
 	}
@@ -94,7 +94,7 @@ func (s *WriterStep) Execute(ctx *workflow.Context) (workflow.Result, error) {
 	return result, nil
 }
 
-func (s *WriterStep) executeLocalFallback(segment string, candidate recommendation.Vehicle) (workflow.Result, error) {
+func (s *WriterStep) executeLocalFallback(segment string, candidate recommendation.Product) (workflow.Result, error) {
 	modelName := candidate.Model
 	if modelName == "" {
 		modelName = "Premium Selection"
