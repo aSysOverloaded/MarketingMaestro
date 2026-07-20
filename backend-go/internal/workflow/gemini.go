@@ -90,7 +90,7 @@ func CallGemini(ctx *Context, prompt string, target interface{}) error {
 
 	geminiApiKey := getAPIKey()
 	if geminiApiKey == "" {
-		log.Printf("[TraceID: %s] [JobID: %s] [Gemini] GEMINI_API_KEY is empty. Falling back to local simulation.", ctx.TraceID, ctx.JobID)
+		log.Printf("[TraceID: %s] [JobID: %s] [Gemini] [FALLBACK] GEMINI_API_KEY is empty. Falling back to local simulation.", ctx.TraceID, ctx.JobID)
 		return simulateFallback(prompt, target)
 	}
 
@@ -152,13 +152,13 @@ func CallGemini(ctx *Context, prompt string, target interface{}) error {
 			time.Sleep(retryDelay)
 			continue
 		} else {
-			log.Printf("[TraceID: %s] [JobID: %s] [Gemini] [WARNING] Gemini request failed (Status: %d). Falling back to local simulation. Error body: %s", ctx.TraceID, ctx.JobID, resp.StatusCode, string(bodyBytes))
+			log.Printf("[TraceID: %s] [JobID: %s] [Gemini] [FALLBACK] Gemini request failed (Status: %d). Falling back to local simulation. Error body: %s", ctx.TraceID, ctx.JobID, resp.StatusCode, string(bodyBytes))
 			return simulateFallback(prompt, target)
 		}
 	}
 
 	if resp == nil || resp.StatusCode != http.StatusOK {
-		log.Printf("[TraceID: %s] [JobID: %s] [Gemini] [WARNING] Gemini retries exhausted. Falling back to local simulation.", ctx.TraceID, ctx.JobID)
+		log.Printf("[TraceID: %s] [JobID: %s] [Gemini] [FALLBACK] Gemini retries exhausted. Falling back to local simulation.", ctx.TraceID, ctx.JobID)
 		return simulateFallback(prompt, target)
 	}
 
@@ -237,13 +237,13 @@ func CallOpenAICompatible(ctx *Context, apiURL, apiKey, model, prompt string, ta
 			time.Sleep(retryDelay)
 			continue
 		} else {
-			log.Printf("[TraceID: %s] [JobID: %s] [OpenAI] [WARNING] request failed (Status: %d). Error body: %s. Falling back to local simulation.", ctx.TraceID, ctx.JobID, resp.StatusCode, string(bodyBytes))
+			log.Printf("[TraceID: %s] [JobID: %s] [OpenAI] [FALLBACK] Request failed (Status: %d). Error body: %s. Falling back to local simulation.", ctx.TraceID, ctx.JobID, resp.StatusCode, string(bodyBytes))
 			return simulateFallback(prompt, target)
 		}
 	}
 
 	if resp == nil || resp.StatusCode != http.StatusOK {
-		log.Printf("[TraceID: %s] [JobID: %s] [OpenAI] [WARNING] retries exhausted. Falling back to local simulation.", ctx.TraceID, ctx.JobID)
+		log.Printf("[TraceID: %s] [JobID: %s] [OpenAI] [FALLBACK] OpenAI retries exhausted. Falling back to local simulation.", ctx.TraceID, ctx.JobID)
 		return simulateFallback(prompt, target)
 	}
 
@@ -329,13 +329,13 @@ func ParsePDFBrochure(ctx *Context, pdfBytes []byte) ([]recommendation.Product, 
 
 	resp, err := client.Do(req)
 	if err != nil {
-		log.Printf("[TraceID: %s] [JobID: %s] [RAG] [WARNING] Failed to upload catalog to Python Qdrant: %v. Using local simulation fallback.", ctx.TraceID, ctx.JobID, err)
+		log.Printf("[TraceID: %s] [JobID: %s] [RAG] [FALLBACK] Failed to upload catalog to Python Qdrant: %v. Using local simulation fallback.", ctx.TraceID, ctx.JobID, err)
 		return runLocalPDFMockFallback()
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		log.Printf("[TraceID: %s] [JobID: %s] [RAG] [WARNING] Python RAG returned status %d. Using local simulation fallback.", ctx.TraceID, ctx.JobID, resp.StatusCode)
+		log.Printf("[TraceID: %s] [JobID: %s] [RAG] [FALLBACK] Python RAG returned status %d. Using local simulation fallback.", ctx.TraceID, ctx.JobID, resp.StatusCode)
 		return runLocalPDFMockFallback()
 	}
 

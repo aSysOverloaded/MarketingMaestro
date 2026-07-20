@@ -134,7 +134,7 @@ func (s *EmailDispatchStep) Execute(ctx *workflow.Context) (workflow.Result, err
 			return nil, fmt.Errorf("failed to write local email log file: %w", err)
 		}
 		
-		log.Printf("[TraceID: %s] [JobID: %s] [Email] Mock email logged locally to: %s", ctx.TraceID, ctx.JobID, emailLogPath)
+		log.Printf("[TraceID: %s] [JobID: %s] [Email] [FALLBACK] Mock email logged locally to: %s", ctx.TraceID, ctx.JobID, emailLogPath)
 	}
 
 	return workflow.EmailDispatchResult{

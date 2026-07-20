@@ -86,7 +86,7 @@ func (s *ProductRecommenderStep) Execute(ctx *workflow.Context) (workflow.Result
 		queryText := fmt.Sprintf("hobbies: %v, family size: %d, location: %s", userProfile.Hobbies, userProfile.FamilySize, userProfile.Location)
 		ragCandidates, err := queryRAGAndParse(ctx, queryText)
 		if err != nil {
-			log.Printf("[TraceID: %s] [JobID: %s] [RAG] [WARNING] Qdrant search/parse failed: %v. Bypassing to default catalog.", ctx.TraceID, ctx.JobID, err)
+			log.Printf("[TraceID: %s] [JobID: %s] [ProductRecommenderStep] [FALLBACK] Qdrant search/parse failed: %v. Bypassing to default catalog.", ctx.TraceID, ctx.JobID, err)
 		} else {
 			candidates = ragCandidates
 		}
@@ -114,6 +114,7 @@ func (s *ProductRecommenderStep) Execute(ctx *workflow.Context) (workflow.Result
 
 	// Fallback to static catalog DB if no custom products are uploaded
 	if len(candidates) == 0 {
+		log.Printf("[TraceID: %s] [JobID: %s] [ProductRecommenderStep] [FALLBACK] Empty candidate list. Falling back to the default static catalog database.", ctx.TraceID, ctx.JobID)
 		candidates = []recommendation.Candidate{
 			recommendation.Product{
 				ID:        "appliance_fridge_samsung",

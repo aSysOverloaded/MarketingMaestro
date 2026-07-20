@@ -65,13 +65,13 @@ func (s *CriticStep) Execute(ctx *workflow.Context) (workflow.Result, error) {
 	resp, err := client.Post(reqUrl, "application/json", bytes.NewBuffer(jsonBytes))
 
 	if err != nil {
-		log.Printf("[TraceID: %s] [JobID: %s] [CriticStep] [WARNING] Failed to contact Python Critic API: %v. Proceeding in safety bypass mode.", ctx.TraceID, ctx.JobID, err)
+		log.Printf("[TraceID: %s] [JobID: %s] [CriticStep] [FALLBACK] Failed to contact Python Critic API: %v. Proceeding in safety bypass mode.", ctx.TraceID, ctx.JobID, err)
 		return CriticResult{Passed: true, Feedback: "Bypassed: critic worker offline"}, nil
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		log.Printf("[TraceID: %s] [JobID: %s] [CriticStep] [WARNING] Python Critic API status %d. Proceeding in bypass mode.", ctx.TraceID, ctx.JobID, resp.StatusCode)
+		log.Printf("[TraceID: %s] [JobID: %s] [CriticStep] [FALLBACK] Python Critic API status %d. Proceeding in bypass mode.", ctx.TraceID, ctx.JobID, resp.StatusCode)
 		return CriticResult{Passed: true, Feedback: "Bypassed: critic error status"}, nil
 	}
 

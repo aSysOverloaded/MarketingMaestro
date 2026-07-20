@@ -75,14 +75,14 @@ func (s *WriterStep) Execute(ctx *workflow.Context) (workflow.Result, error) {
 	resp, err := client.Post(reqUrl, "application/json", bytes.NewBuffer(jsonBytes))
 
 	if err != nil {
-		log.Printf("[TraceID: %s] [JobID: %s] [WriterStep] [WARNING] Failed to contact Python Writer API: %v. Using local simulation fallback.", ctx.TraceID, ctx.JobID, err)
-		return s.executeLocalFallback(segment, candidate)
+		log.Printf("[TraceID: %s] [JobID: %s] [WriterStep] [FALLBACK] Failed to contact Python Writer API: %v. Using local simulation fallback.", ctx.TraceID, ctx.JobID, err)
+		return s.executeLocalFallback(ctx, segment, candidate)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		log.Printf("[TraceID: %s] [JobID: %s] [WriterStep] [WARNING] Python Writer API returned status code %d. Using local simulation fallback.", ctx.TraceID, ctx.JobID, resp.StatusCode)
-		return s.executeLocalFallback(segment, candidate)
+		log.Printf("[TraceID: %s] [JobID: %s] [WriterStep] [FALLBACK] Python Writer API returned status code %d. Using local simulation fallback.", ctx.TraceID, ctx.JobID, resp.StatusCode)
+		return s.executeLocalFallback(ctx, segment, candidate)
 	}
 
 	var result WriterResult
@@ -94,7 +94,8 @@ func (s *WriterStep) Execute(ctx *workflow.Context) (workflow.Result, error) {
 	return result, nil
 }
 
-func (s *WriterStep) executeLocalFallback(segment string, candidate recommendation.Product) (workflow.Result, error) {
+func (s *WriterStep) executeLocalFallback(ctx *workflow.Context, segment string, candidate recommendation.Product) (workflow.Result, error) {
+	log.Printf("[TraceID: %s] [JobID: %s] [WriterStep] [FALLBACK] Serving Go copywriting simulation fallback.", ctx.TraceID, ctx.JobID)
 	modelName := candidate.Model
 	if modelName == "" {
 		modelName = "Premium Selection"

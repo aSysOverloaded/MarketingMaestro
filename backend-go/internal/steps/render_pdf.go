@@ -176,6 +176,7 @@ func findChrome() string {
 
 // executeDeveloperFallback creates a mock PDF binary when chrome is not installed locally
 func (s *PDFRenderStep) executeDeveloperFallback(ctx *workflow.Context, pdfFileName, pdfFilePath string) (workflow.Result, error) {
+	log.Printf("[TraceID: %s] [JobID: %s] [PDFRenderStep] [FALLBACK] Triggered developer mock PDF fallback.", ctx.TraceID, ctx.JobID)
 	if err := os.MkdirAll(s.outputDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create pdf output storage directory: %w", err)
 	}

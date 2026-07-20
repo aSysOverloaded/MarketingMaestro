@@ -58,14 +58,14 @@ func (s *EvaluatorStep) Execute(ctx *workflow.Context) (workflow.Result, error) 
 	resp, err := client.Post(reqUrl, "application/json", bytes.NewBuffer(jsonBytes))
 
 	if err != nil {
-		log.Printf("[TraceID: %s] [JobID: %s] [EvaluatorStep] [WARNING] Failed to contact Python Evaluator API: %v. Running local fallback checks.", ctx.TraceID, ctx.JobID, err)
-		return s.executeLocalFallback(copyData)
+		log.Printf("[TraceID: %s] [JobID: %s] [EvaluatorStep] [FALLBACK] Failed to contact Python Evaluator API: %v. Running local fallback checks.", ctx.TraceID, ctx.JobID, err)
+		return s.executeLocalFallback(ctx, copyData)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		log.Printf("[TraceID: %s] [JobID: %s] [EvaluatorStep] [WARNING] Python Evaluator API status %d. Running local fallback checks.", ctx.TraceID, ctx.JobID, resp.StatusCode)
-		return s.executeLocalFallback(copyData)
+		log.Printf("[TraceID: %s] [JobID: %s] [EvaluatorStep] [FALLBACK] Python Evaluator API status %d. Running local fallback checks.", ctx.TraceID, ctx.JobID, resp.StatusCode)
+		return s.executeLocalFallback(ctx, copyData)
 	}
 
 	var result EvaluatorResult
@@ -82,7 +82,8 @@ func (s *EvaluatorStep) Execute(ctx *workflow.Context) (workflow.Result, error) 
 	return result, nil
 }
 
-func (s *EvaluatorStep) executeLocalFallback(copyData WriterResult) (workflow.Result, error) {
+func (s *EvaluatorStep) executeLocalFallback(ctx *workflow.Context, copyData WriterResult) (workflow.Result, error) {
+	log.Printf("[TraceID: %s] [JobID: %s] [EvaluatorStep] [FALLBACK] Serving Go evaluator safety bypass checks.", ctx.TraceID, ctx.JobID)
 	// Simple local heuristic verification
 	return EvaluatorResult{
 		Passed:           true,

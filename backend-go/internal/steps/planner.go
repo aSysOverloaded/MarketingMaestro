@@ -78,14 +78,14 @@ func (s *PlannerStep) Execute(ctx *workflow.Context) (workflow.Result, error) {
 	resp, err := client.Post(reqUrl, "application/json", bytes.NewBuffer(jsonBytes))
 
 	if err != nil {
-		log.Printf("[TraceID: %s] [JobID: %s] [PlannerStep] [WARNING] Failed to contact Python Planner API: %v. Using Go simulation fallback.", ctx.TraceID, ctx.JobID, err)
-		return s.executeLocalFallback(segment, rec)
+		log.Printf("[TraceID: %s] [JobID: %s] [PlannerStep] [FALLBACK] Failed to contact Python Planner API: %v. Using Go simulation fallback.", ctx.TraceID, ctx.JobID, err)
+		return s.executeLocalFallback(ctx, segment, rec)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		log.Printf("[TraceID: %s] [JobID: %s] [PlannerStep] [WARNING] Python Planner API returned status code %d. Using Go simulation fallback.", ctx.TraceID, ctx.JobID, resp.StatusCode)
-		return s.executeLocalFallback(segment, rec)
+		log.Printf("[TraceID: %s] [JobID: %s] [PlannerStep] [FALLBACK] Python Planner API returned status code %d. Using Go simulation fallback.", ctx.TraceID, ctx.JobID, resp.StatusCode)
+		return s.executeLocalFallback(ctx, segment, rec)
 	}
 
 	var result PlannerResult
@@ -97,7 +97,8 @@ func (s *PlannerStep) Execute(ctx *workflow.Context) (workflow.Result, error) {
 	return result, nil
 }
 
-func (s *PlannerStep) executeLocalFallback(segment string, rec workflow.RecommendationResult) (workflow.Result, error) {
+func (s *PlannerStep) executeLocalFallback(ctx *workflow.Context, segment string, rec workflow.RecommendationResult) (workflow.Result, error) {
+	log.Printf("[TraceID: %s] [JobID: %s] [PlannerStep] [FALLBACK] Serving Go content planner simulation fallback.", ctx.TraceID, ctx.JobID)
 	// Mock content planner structure
 	result := PlannerResult{
 		Sections: []SectionOutline{
