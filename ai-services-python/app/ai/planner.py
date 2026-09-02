@@ -31,7 +31,8 @@ def generate_plan(segment: str, recommendation: dict) -> list:
         ]
 
     genai.configure(api_key=api_key)
-    model = genai.GenerativeModel('gemini-3.5-flash')
+    gemini_model = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
+    model = genai.GenerativeModel(gemini_model)
     
     prompt = f"""You are a content planning agent. Your task is to plan the sections of a personalized marketing brochure.
 Customer Segment: {segment}

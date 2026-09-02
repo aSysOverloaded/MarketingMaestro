@@ -86,5 +86,16 @@ Do not output any markdown formatting or commentary. Just output the raw JSON ob
 		return nil, fmt.Errorf("failed to classify user profile using Gemini: %w", err)
 	}
 
+	// Attributes are pass-through data, not something the LLM should be inventing.
+	// The offline simulation fallback returns a canned profile that ignores the prompt,
+	// so force the real submitted values back in regardless of which path produced result.
+	result.Attributes = map[string]interface{}{
+		"age":         rawAge,
+		"income":      rawIncome,
+		"family_size": rawFamilySize,
+		"hobbies":     rawHobbies,
+		"location":    rawLocation,
+	}
+
 	return result, nil
 }

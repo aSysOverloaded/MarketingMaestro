@@ -1,13 +1,19 @@
 import os
-from fastapi import FastAPI, HTTPException, UploadFile, File
+import logging
+from fastapi import FastAPI, HTTPException, UploadFile, File, Header
 from pydantic import BaseModel
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 from app.ai.planner import generate_plan
 from app.ai.writer import generate_copy
 from app.ai.critic import audit_copy
 from app.ai.evaluator import evaluate_copy
-from app.rag.search import ingest_pdf, search_catalog
+from app.rag.search import ingest_pdf, search_catalog, get_stats
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(name)s] %(levelname)s %(message)s",
+)
 
 app = FastAPI(title="AI Services Python Sidecar")
 
@@ -87,19 +93,26 @@ class SearchRequest(BaseModel):
     limit: int = 3
 
 @app.post("/api/rag/ingest")
-async def ingest_endpoint(file: UploadFile = File(...)):
+async def ingest_endpoint(file: UploadFile = File(...), x_job_id: Optional[str] = Header(default="unknown")):
     try:
         pdf_bytes = await file.read()
-        res = ingest_pdf(pdf_bytes)
+        res = ingest_pdf(pdf_bytes, job_id=x_job_id)
         return res
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/rag/search")
-def search_endpoint(payload: SearchRequest):
+def search_endpoint(payload: SearchRequest, x_job_id: Optional[str] = Header(default="unknown")):
     try:
-        matches = search_catalog(payload.query, payload.limit)
+        matches = search_catalog(payload.query, payload.limit, job_id=x_job_id)
         return {"matches": matches}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/rag/stats")
+def stats_endpoint():
+    try:
+        return get_stats()
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

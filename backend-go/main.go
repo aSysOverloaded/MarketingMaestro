@@ -13,12 +13,20 @@ import (
 	"strings"
 	"time"
 
+	"github.com/joho/godotenv"
+
 	"marketing-agent/internal/recommendation"
 	"marketing-agent/internal/steps"
 	"marketing-agent/internal/workflow"
 )
 
 func main() {
+	// Load .env if present so API keys/config don't need to be retyped in every shell session.
+	// Missing file is fine - real env vars set in the shell still take priority when present.
+	if err := godotenv.Load(); err != nil {
+		log.Printf("No .env file found, relying on shell environment variables only.")
+	}
+
 	// Resolve base paths
 	baseDir, err := os.Getwd()
 	if err != nil {
@@ -227,6 +235,7 @@ func main() {
 			"workflow_state":  state.WorkflowState,
 			"recommendations": recs,
 			"pdf_url":         pdfUrl,
+			"rag_debug":       state.StepOutputs["RAGDebug"],
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -296,6 +305,43 @@ func main() {
 			"success": true,
 			"message": fmt.Sprintf("Email sent successfully to %s!", email),
 		})
+	})
+
+	// Proxy endpoint so the UI can read RAG/Qdrant index stats without a separate CORS setup
+	http.HandleFunc("/api/rag/stats", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		pythonUrl := os.Getenv("PYTHON_SERVICE_URL")
+		if pythonUrl == "" {
+			pythonUrl = "http://localhost:8000"
+		}
+
+		client := &http.Client{Timeout: 5 * time.Second}
+		resp, err := client.Get(pythonUrl + "/api/rag/stats")
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"reachable": false,
+				"error":     err.Error(),
+			})
+			return
+		}
+		defer resp.Body.Close()
+
+		var stats map[string]interface{}
+		if err := json.NewDecoder(resp.Body).Decode(&stats); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"reachable": false,
+				"error":     fmt.Sprintf("failed to decode sidecar response: %v", err),
+			})
+			return
+		}
+		stats["reachable"] = true
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(stats)
 	})
 
 	// Serve generated files from the storage path

@@ -83,7 +83,7 @@ func CallGemini(ctx *Context, prompt string, target interface{}) error {
 
 	if apiUrl != "" && apiKey != "" {
 		if model == "" {
-			model = "qwen/qwen-2.5-72b-instruct:free" // Default free OpenRouter model
+			model = "minimax/minimax-m2.7:free" // Default free OpenRouter model - check LLM_MODEL if this 404s later, OpenRouter's free lineup rotates
 		}
 		return CallOpenAICompatible(ctx, apiUrl, apiKey, model, prompt, target)
 	}
@@ -94,7 +94,12 @@ func CallGemini(ctx *Context, prompt string, target interface{}) error {
 		return simulateFallback(prompt, target)
 	}
 
-	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=%s", apiKey)
+	geminiModel := os.Getenv("GEMINI_MODEL")
+	if geminiModel == "" {
+		geminiModel = "gemini-3.6-flash"
+	}
+
+	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent?key=%s", geminiModel, geminiApiKey)
 
 	reqBody := GeminiRequest{
 		Contents: []GeminiContent{
@@ -172,11 +177,31 @@ func CallGemini(ctx *Context, prompt string, target interface{}) error {
 	}
 
 	responseText := geminiResp.Candidates[0].Content.Parts[0].Text
+	log.Printf("[TraceID: %s] [JobID: %s] [Gemini] Raw response (truncated): %s", ctx.TraceID, ctx.JobID, truncateForLog(responseText, 1000))
 	if err := json.Unmarshal([]byte(responseText), target); err != nil {
 		return fmt.Errorf("failed to parse structured JSON response from Gemini into target interface: %w. Response text was: %s", err, responseText)
 	}
+	logIfEmptySlice(ctx, "Gemini", target)
 
 	return nil
+}
+
+// truncateForLog caps a string for log output so a large model response doesn't flood the console.
+func truncateForLog(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + fmt.Sprintf("... (truncated, %d total chars)", len(s))
+}
+
+// logIfEmptySlice flags the case where the LLM call succeeded and produced valid JSON, but the
+// JSON was an empty array - a silent "the model chose to extract nothing" outcome that otherwise
+// looks identical to a real failure once it triggers a fallback to the default catalog downstream.
+func logIfEmptySlice(ctx *Context, provider string, target interface{}) {
+	v := reflect.ValueOf(target)
+	if v.Kind() == reflect.Ptr && v.Elem().Kind() == reflect.Slice && v.Elem().Len() == 0 {
+		log.Printf("[TraceID: %s] [JobID: %s] [%s] [WARNING] Call succeeded and parsed valid JSON, but the model returned an empty array - it found nothing to extract from the given content.", ctx.TraceID, ctx.JobID, provider)
+	}
 }
 
 // CallOpenAICompatible executes structured chat completions queries on standard OpenAI-compatible endpoints
@@ -257,6 +282,7 @@ func CallOpenAICompatible(ctx *Context, apiURL, apiKey, model, prompt string, ta
 	}
 
 	responseText := openAIResp.Choices[0].Message.Content
+	log.Printf("[TraceID: %s] [JobID: %s] [OpenAI] Raw response (truncated): %s", ctx.TraceID, ctx.JobID, truncateForLog(responseText, 1000))
 	cleanText := responseText
 	if strings.Contains(cleanText, "```json") {
 		cleanText = strings.Split(cleanText, "```json")[1]
@@ -272,6 +298,7 @@ func CallOpenAICompatible(ctx *Context, apiURL, apiKey, model, prompt string, ta
 				trimmedVal := strings.TrimSpace(string(val))
 				if strings.HasPrefix(trimmedVal, "[") {
 					if err := json.Unmarshal(val, target); err == nil {
+						logIfEmptySlice(ctx, "OpenAI", target)
 						return nil // Successfully parsed wrapped array!
 					}
 				}
@@ -296,6 +323,7 @@ func CallOpenAICompatible(ctx *Context, apiURL, apiKey, model, prompt string, ta
 	if err := json.Unmarshal([]byte(cleanText), target); err != nil {
 		return fmt.Errorf("failed to parse structured JSON response from OpenAI into target: %w. Response text was: %s", err, responseText)
 	}
+	logIfEmptySlice(ctx, "OpenAI", target)
 
 	return nil
 }
@@ -326,6 +354,7 @@ func ParsePDFBrochure(ctx *Context, pdfBytes []byte) ([]recommendation.Product, 
 		return nil, fmt.Errorf("failed to create RAG ingest request: %w", err)
 	}
 	req.Header.Set("Content-Type", bodyWriter.FormDataContentType())
+	req.Header.Set("X-Job-ID", ctx.JobID)
 
 	resp, err := client.Do(req)
 	if err != nil {

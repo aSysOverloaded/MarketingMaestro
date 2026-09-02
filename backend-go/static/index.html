@@ -183,6 +183,37 @@
                         <!-- Dynamic content injected here -->
                     </div>
                 </div>
+
+                <!-- RAG / Pipeline Diagnostics Panel -->
+                <div id="diagnostics-card" class="glass-card rounded-3xl p-6 space-y-4 shadow-2xl">
+                    <button id="diagnostics-toggle" class="w-full flex justify-between items-center text-left">
+                        <div class="flex items-center space-x-2">
+                            <h3 class="text-sm font-bold text-white tracking-tight uppercase">Diagnostics</h3>
+                            <span id="rag-status-dot" class="h-2 w-2 rounded-full bg-slate-600"></span>
+                        </div>
+                        <svg id="diagnostics-chevron" class="h-4 w-4 text-slate-400 transition-transform duration-200" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+                        </svg>
+                    </button>
+
+                    <div id="diagnostics-body" class="hidden space-y-5 pt-2 border-t border-slate-800">
+                        <!-- Qdrant Index Stats -->
+                        <div class="space-y-2">
+                            <h4 class="text-[11px] font-bold uppercase tracking-wider text-slate-400">Catalog Index (Qdrant)</h4>
+                            <div id="rag-stats-body" class="grid grid-cols-2 gap-2 text-xs text-slate-300">
+                                <span class="text-slate-500">Loading...</span>
+                            </div>
+                        </div>
+
+                        <!-- Last Retrieval -->
+                        <div class="space-y-2">
+                            <h4 class="text-[11px] font-bold uppercase tracking-wider text-slate-400">Last Retrieval (this run)</h4>
+                            <div id="rag-retrieval-body" class="text-xs text-slate-300 space-y-2">
+                                <span class="text-slate-500">Run a recommendation to see retrieval results here.</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
             </div>
 
         </main>
@@ -210,6 +241,116 @@
 
         const loadingTitle = document.getElementById('loading-title');
         const loadingSub = document.getElementById('loading-sub');
+
+        // --- Diagnostics panel ---
+        const diagnosticsToggle = document.getElementById('diagnostics-toggle');
+        const diagnosticsBody = document.getElementById('diagnostics-body');
+        const diagnosticsChevron = document.getElementById('diagnostics-chevron');
+        const ragStatsBody = document.getElementById('rag-stats-body');
+        const ragRetrievalBody = document.getElementById('rag-retrieval-body');
+        const ragStatusDot = document.getElementById('rag-status-dot');
+
+        diagnosticsToggle.addEventListener('click', () => {
+            diagnosticsBody.classList.toggle('hidden');
+            diagnosticsChevron.classList.toggle('rotate-180');
+        });
+
+        function escapeHtml(str) {
+            return String(str).replace(/[&<>"']/g, (c) => ({
+                '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+            })[c]);
+        }
+
+        async function refreshRagStats() {
+            try {
+                const res = await fetch('/api/rag/stats');
+                const stats = await res.json();
+
+                if (!stats.reachable) {
+                    ragStatusDot.className = 'h-2 w-2 rounded-full bg-red-500';
+                    ragStatsBody.innerHTML = `<span class="col-span-2 text-red-400">Python AI sidecar unreachable${stats.error ? ': ' + escapeHtml(stats.error) : ''}.</span>`;
+                    return;
+                }
+
+                const mockWarning = stats.embeddings_mode === 'mock'
+                    ? `<div class="col-span-2 bg-red-900 bg-opacity-30 border border-red-800 rounded-lg px-3 py-2 text-red-300">
+                         ⚠ Embeddings are a mock constant vector — every match will score ~1.000 and retrieval is meaningless.
+                         ${stats.embeddings_detail ? `<div class="mt-1 font-mono text-[10px] text-red-400 break-all">${escapeHtml(stats.embeddings_detail)}</div>` : ''}
+                       </div>`
+                    : (stats.embeddings_mode === 'unknown'
+                        ? `<div class="col-span-2 text-slate-500">No embedding calls made yet this process lifetime.</div>`
+                        : '');
+
+                if (!stats.collection_exists) {
+                    ragStatusDot.className = 'h-2 w-2 rounded-full bg-yellow-500';
+                    ragStatsBody.innerHTML = mockWarning + `<span class="col-span-2 text-slate-400">No catalog ingested yet — recommendations will use the static fallback catalog.</span>`;
+                    return;
+                }
+
+                ragStatusDot.className = stats.embeddings_mode === 'real' ? 'h-2 w-2 rounded-full bg-green-500' : 'h-2 w-2 rounded-full bg-red-500';
+                const li = stats.last_ingest || {};
+                ragStatsBody.innerHTML = mockWarning + `
+                    <span class="text-slate-500">Embeddings</span><span class="font-mono text-right ${stats.embeddings_mode === 'mock' ? 'text-red-400' : 'text-green-400'}">${stats.embeddings_mode}</span>
+                    <span class="text-slate-500">Indexed pages</span><span class="font-mono text-right">${stats.point_count ?? '—'}</span>
+                    <span class="text-slate-500">Last ingest pages</span><span class="font-mono text-right">${li.indexed_pages ?? '—'} / ${li.total_pages ?? '—'}</span>
+                    <span class="text-slate-500">Skipped empty pages</span><span class="font-mono text-right">${li.skipped_empty_pages ?? '—'}</span>
+                    <span class="text-slate-500">Image extract failures</span><span class="font-mono text-right ${li.image_extract_failures ? 'text-yellow-400' : ''}">${li.image_extract_failures ?? '—'}</span>
+                    <span class="text-slate-500">Ingest duration</span><span class="font-mono text-right">${li.duration_ms != null ? li.duration_ms + ' ms' : '—'}</span>
+                    <span class="text-slate-500">Last ingest job</span><span class="font-mono text-right truncate" title="${escapeHtml(li.job_id || '')}">${escapeHtml((li.job_id || '—').slice(-14))}</span>
+                `;
+            } catch (err) {
+                ragStatusDot.className = 'h-2 w-2 rounded-full bg-red-500';
+                ragStatsBody.innerHTML = `<span class="col-span-2 text-red-400">Failed to reach diagnostics endpoint: ${escapeHtml(err.message)}</span>`;
+            }
+        }
+
+        function renderRagDebug(ragDebug) {
+            if (!ragDebug) {
+                ragRetrievalBody.innerHTML = `<span class="text-slate-500">No retrieval debug info returned by this run.</span>`;
+                return;
+            }
+
+            if (!ragDebug.active) {
+                ragRetrievalBody.innerHTML = `<span class="text-yellow-400">RAG not used for this run — served from the static/uploaded fallback catalog, not the vector index.</span>`;
+                return;
+            }
+
+            if (ragDebug.error) {
+                ragRetrievalBody.innerHTML = `
+                    <div class="text-red-400">Retrieval failed: ${escapeHtml(ragDebug.error)}</div>
+                    <div class="text-slate-500">Query: <span class="font-mono">${escapeHtml(ragDebug.query || '')}</span></div>
+                    <div class="text-yellow-400">Fell back to the static/uploaded catalog for this run.</div>
+                `;
+                return;
+            }
+
+            if (!ragDebug.matches || ragDebug.matches.length === 0) {
+                ragRetrievalBody.innerHTML = `
+                    <div class="text-yellow-400">0 matches found for this query.</div>
+                    <div class="text-slate-500">Query: <span class="font-mono">${escapeHtml(ragDebug.query || '')}</span></div>
+                `;
+                return;
+            }
+
+            const rows = ragDebug.matches.map(m => {
+                const scoreColor = m.score >= 0.75 ? 'text-green-400' : (m.score >= 0.5 ? 'text-yellow-400' : 'text-red-400');
+                return `
+                    <div class="flex items-center justify-between border border-slate-800 rounded-lg px-3 py-1.5">
+                        <span class="text-slate-400">Page ${m.page_number}</span>
+                        <span class="font-mono ${scoreColor}">score ${m.score.toFixed(3)}</span>
+                        <span class="text-slate-500">${m.content_length} chars · ${m.image_count} img</span>
+                    </div>
+                `;
+            }).join('');
+
+            ragRetrievalBody.innerHTML = `
+                <div class="text-slate-500">Query: <span class="font-mono">${escapeHtml(ragDebug.query || '')}</span></div>
+                <div class="space-y-1.5">${rows}</div>
+            `;
+        }
+
+        // Initial load
+        refreshRagStats();
 
         // Drag & Drop event bindings
         dropzone.addEventListener('click', () => fileInput.click());
@@ -342,6 +483,9 @@
 
                 loadingCard.classList.add('hidden');
                 resultCard.classList.remove('hidden');
+
+                renderRagDebug(data.rag_debug);
+                refreshRagStats();
 
             } catch (err) {
                 alert(`Error: ${err.message}`);

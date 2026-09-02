@@ -25,7 +25,8 @@ def evaluate_copy(copy: dict) -> dict:
         }
 
     genai.configure(api_key=api_key)
-    model = genai.GenerativeModel('gemini-3.5-flash')
+    gemini_model = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
+    model = genai.GenerativeModel(gemini_model)
 
     prompt = f"""You are a brand quality evaluation agent (Evaluator).
 Analyze the following marketing copy draft and grade it on readability, style consistency, and alignment with a professional, helpful tone.

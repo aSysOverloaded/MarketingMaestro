@@ -61,8 +61,9 @@ func (s *PDFRenderStep) Execute(ctx *workflow.Context) (workflow.Result, error) 
 	if chromePath == "" {
 		_, pathErr := exec.LookPath("google-chrome")
 		_, pathErr2 := exec.LookPath("chrome")
-		if pathErr != nil && pathErr2 != nil {
-			log.Printf("[TraceID: %s] [JobID: %s] [WARNING] [PDFRenderStep] Google Chrome not detected. Triggering developer fallback.", ctx.TraceID, ctx.JobID)
+		_, pathErr3 := exec.LookPath("msedge")
+		if pathErr != nil && pathErr2 != nil && pathErr3 != nil {
+			log.Printf("[TraceID: %s] [JobID: %s] [WARNING] [PDFRenderStep] Neither Google Chrome nor Microsoft Edge was detected. Triggering developer fallback.", ctx.TraceID, ctx.JobID)
 			return s.executeDeveloperFallback(ctx, pdfFileName, pdfFilePath)
 		}
 	}
@@ -157,13 +158,18 @@ func (s *PDFRenderStep) Compensate(ctx *workflow.Context) error {
 	return nil
 }
 
-// findChrome scans default installation paths on Windows systems
+// findChrome scans default installation paths on Windows systems for a Chromium-based
+// browser. Microsoft Edge is Chromium-based and speaks the same DevTools protocol chromedp
+// needs, and ships preinstalled on Windows, so it's checked as a fallback when Chrome isn't found.
 func findChrome() string {
 	paths := []string{
 		`C:\Program Files\Google\Chrome\Application\chrome.exe`,
 		`C:\Program Files (x86)\Google\Chrome\Application\chrome.exe`,
 		filepath.Join(os.Getenv("USERPROFILE"), `AppData\Local\Google\Chrome\Application\chrome.exe`),
 		filepath.Join(os.Getenv("LOCALAPPDATA"), `Google\Chrome\Application\chrome.exe`),
+		`C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe`,
+		`C:\Program Files\Microsoft\Edge\Application\msedge.exe`,
+		filepath.Join(os.Getenv("LOCALAPPDATA"), `Microsoft\Edge\Application\msedge.exe`),
 	}
 
 	for _, p := range paths {

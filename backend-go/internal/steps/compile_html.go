@@ -1,8 +1,10 @@
 package steps
 
 import (
+	"encoding/base64"
 	"fmt"
 	"html/template"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -41,7 +43,8 @@ type recommendationItem struct {
 	Product struct {
 		Model      string
 		BasePrice  string
-		HeroImage  string
+		HeroImage  template.URL // template.URL, not string: marks base64 data URIs as pre-vetted
+		// safe so html/template's URL-context auto-escaper doesn't replace them with "#ZgotmplZ"
 		Seats      int
 		Horsepower int
 		Capacity   string
@@ -90,6 +93,7 @@ func (s *CompileHTMLStep) Execute(ctx *workflow.Context) (workflow.Result, error
 
 	// 2. Fetch specifications and brand guidelines for all recommended options
 	var recommendationItems []recommendationItem
+	storageDir := filepath.Dir(s.outputDir)
 	for _, r := range recs {
 		var prod templateProductSpec
 		found := false
@@ -181,9 +185,32 @@ func (s *CompileHTMLStep) Execute(ctx *workflow.Context) (workflow.Result, error
 
 		brnd := s.getBrandConfigByModel(prod.Model)
 
+		// chromedp renders this HTML via a file:// URL (see PDFRenderStep), where an absolute
+		// path like "/storage/extracted_images/x.jpg" resolves against the filesystem root, not
+		// the Go webserver - so locally-extracted RAG images 404 silently inside the rendered
+		// PDF even though they load fine in the live web UI. Embed them as base64 data URIs
+		// instead, which work identically regardless of file:// vs http:// context.
+		embeddedHeroImage := embedLocalImage(ctx, prod.HeroImage, storageDir)
+
 		item := recommendationItem{
-			Brand:   brnd,
-			Product: prod,
+			Brand: brnd,
+			Product: struct {
+				Model      string
+				BasePrice  string
+				HeroImage  template.URL
+				Seats      int
+				Horsepower int
+				Capacity   string
+				Features   []string
+			}{
+				Model:      prod.Model,
+				BasePrice:  prod.BasePrice,
+				HeroImage:  template.URL(embeddedHeroImage),
+				Seats:      prod.Seats,
+				Horsepower: prod.Horsepower,
+				Capacity:   prod.Capacity,
+				Features:   prod.Features,
+			},
 			Recommendation: struct {
 				Score        int
 				MatchedRules []string
@@ -273,6 +300,44 @@ func (s *CompileHTMLStep) Execute(ctx *workflow.Context) (workflow.Result, error
 	}
 
 	return outputFilePath, nil
+}
+
+// embedLocalImage converts a locally-served "/storage/..." image path into a base64 data URI so
+// it renders correctly when the compiled HTML is opened via file:// (as chromedp does for PDF
+// rendering), where absolute paths can't resolve back to the Go webserver. External URLs (e.g.
+// the Unsplash stock photo fallbacks) are left untouched since those work fine either way.
+func embedLocalImage(ctx *workflow.Context, heroImage, storageDir string) string {
+	if !strings.HasPrefix(heroImage, "/storage/") {
+		return heroImage
+	}
+
+	relPath := strings.TrimPrefix(heroImage, "/storage/")
+	fullPath := filepath.Join(storageDir, relPath)
+
+	data, err := os.ReadFile(fullPath)
+	if err != nil {
+		log.Printf("[TraceID: %s] [JobID: %s] [HTMLCompileStep] [WARNING] Failed to read local hero image %s for embedding: %v. Image will be broken in the rendered PDF.", ctx.TraceID, ctx.JobID, fullPath, err)
+		return heroImage
+	}
+
+	var mimeType string
+	switch strings.ToLower(filepath.Ext(fullPath)) {
+	case ".jpg", ".jpeg":
+		mimeType = "image/jpeg"
+	case ".png":
+		mimeType = "image/png"
+	case ".gif":
+		mimeType = "image/gif"
+	case ".webp":
+		mimeType = "image/webp"
+	default:
+		// Unsupported format (e.g. .jp2 - browsers can't render JPEG 2000 either way).
+		// Leave it as-is rather than embed bytes the browser won't display anyway.
+		log.Printf("[TraceID: %s] [JobID: %s] [HTMLCompileStep] [WARNING] Unsupported image format for %s, leaving as local path (will be broken in PDF).", ctx.TraceID, ctx.JobID, fullPath)
+		return heroImage
+	}
+
+	return fmt.Sprintf("data:%s;base64,%s", mimeType, base64.StdEncoding.EncodeToString(data))
 }
 
 // Struct representing template-friendly product spec

@@ -18,7 +18,8 @@ def generate_copy(segment: str, sections: list, candidate: dict) -> dict:
         }
 
     genai.configure(api_key=api_key)
-    model = genai.GenerativeModel('gemini-3.5-flash')
+    gemini_model = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
+    model = genai.GenerativeModel(gemini_model)
 
     prompt = f"""You are a professional copywriter agent. Write persuasive copy for a personalized marketing brochure.
 Customer Segment: {segment}

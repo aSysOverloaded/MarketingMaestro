@@ -7,11 +7,30 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"sort"
+	"strings"
 	"time"
 
 	"marketing-agent/internal/recommendation"
 	"marketing-agent/internal/workflow"
 )
+
+// RAGDebugInfo captures retrieval diagnostics surfaced to the UI so a bad
+// recommendation can be traced back to weak/missing retrieval instead of guessed at.
+type RAGDebugInfo struct {
+	Active     bool           `json:"active"`
+	Query      string         `json:"query,omitempty"`
+	MatchCount int            `json:"match_count"`
+	Matches    []RAGDebugHit  `json:"matches,omitempty"`
+	Error      string         `json:"error,omitempty"`
+}
+
+type RAGDebugHit struct {
+	PageNumber int     `json:"page_number"`
+	Score      float64 `json:"score"`
+	ImageCount int     `json:"image_count"`
+	ContentLen int      `json:"content_length"`
+}
 
 // ProductRecommenderStep scores and matches catalog items using the matcher engine
 type ProductRecommenderStep struct {
@@ -83,13 +102,17 @@ func (s *ProductRecommenderStep) Execute(ctx *workflow.Context) (workflow.Result
 
 	if hasRAG && ragActive {
 		log.Printf("[TraceID: %s] [JobID: %s] [RAG] Searching in-memory Qdrant database...", ctx.TraceID, ctx.JobID)
-		queryText := fmt.Sprintf("hobbies: %v, family size: %d, location: %s", userProfile.Hobbies, userProfile.FamilySize, userProfile.Location)
-		ragCandidates, err := queryRAGAndParse(ctx, queryText)
+		ragCandidates, ragDebug, err := queryRAGAndParse(ctx, userProfile.Hobbies)
+		ragDebug.Active = true
 		if err != nil {
 			log.Printf("[TraceID: %s] [JobID: %s] [ProductRecommenderStep] [FALLBACK] Qdrant search/parse failed: %v. Bypassing to default catalog.", ctx.TraceID, ctx.JobID, err)
+			ragDebug.Error = err.Error()
 		} else {
 			candidates = ragCandidates
 		}
+		ctx.State.StepOutputs["RAGDebug"] = ragDebug
+	} else {
+		ctx.State.StepOutputs["RAGDebug"] = RAGDebugInfo{Active: false}
 	}
 
 	if len(candidates) == 0 {
@@ -168,7 +191,7 @@ func (s *ProductRecommenderStep) Execute(ctx *workflow.Context) (workflow.Result
 
 	prompt := fmt.Sprintf(`You are an expert sales and recommendation agent.
 Given the following User Profile and Candidate Products Catalog, rank the candidates in descending order of how well they match the user's needs.
-Select the top candidates (select 2 options) that are suitable.
+Select up to the top 4 candidates that are suitable (fewer is fine if the catalog has fewer than 4 items; never invent candidates not present in the catalog below).
 
 User Profile:
 %s
@@ -181,7 +204,7 @@ For each recommended product, calculate:
 - Matched rules: specific, concise reasons why it matches (e.g. "Fits budget", "Large capacity fits family size").
 - Explanation: a 1-sentence summary of why this product is recommended for the user.
 
-Respond with a JSON array containing precisely these objects (ordered by score descending):
+Respond with a JSON array containing precisely these objects (ordered by score descending, up to 4 entries):
 [
   {
     "recommendation_id": "rec_job_%s_1",
@@ -226,7 +249,16 @@ Do not output any markdown formatting or commentary. Just output the raw JSON ar
 	return ranks, nil
 }
 
-func queryRAGAndParse(ctx *workflow.Context, query string) ([]recommendation.Candidate, error) {
+// ragMatch mirrors the Python sidecar's /api/rag/search response shape for a single hit.
+type ragMatch struct {
+	PageNumber int      `json:"page_number"`
+	Content    string   `json:"content"`
+	Images     []string `json:"images"`
+	Score      float64  `json:"score"`
+}
+
+// searchRAGOnce issues a single query against the Python sidecar's vector search endpoint.
+func searchRAGOnce(ctx *workflow.Context, query string, limit int) ([]ragMatch, error) {
 	pythonUrl := os.Getenv("PYTHON_SERVICE_URL")
 	if pythonUrl == "" {
 		pythonUrl = "http://localhost:8000"
@@ -234,7 +266,7 @@ func queryRAGAndParse(ctx *workflow.Context, query string) ([]recommendation.Can
 
 	payload := map[string]interface{}{
 		"query": query,
-		"limit": 3,
+		"limit": limit,
 	}
 	jsonBytes, err := json.Marshal(payload)
 	if err != nil {
@@ -243,7 +275,14 @@ func queryRAGAndParse(ctx *workflow.Context, query string) ([]recommendation.Can
 
 	client := &http.Client{Timeout: 10 * time.Second}
 	reqUrl := fmt.Sprintf("%s/api/rag/search", pythonUrl)
-	resp, err := client.Post(reqUrl, "application/json", bytes.NewBuffer(jsonBytes))
+	req, err := http.NewRequest("POST", reqUrl, bytes.NewBuffer(jsonBytes))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create RAG search request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Job-ID", ctx.JobID)
+
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("RAG search HTTP error: %w", err)
 	}
@@ -254,29 +293,87 @@ func queryRAGAndParse(ctx *workflow.Context, query string) ([]recommendation.Can
 	}
 
 	var searchResp struct {
-		Matches []struct {
-			PageNumber int      `json:"page_number"`
-			Content    string   `json:"content"`
-			Images     []string `json:"images"`
-			Score      float64  `json:"score"`
-		} `json:"matches"`
+		Matches []ragMatch `json:"matches"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&searchResp); err != nil {
 		return nil, fmt.Errorf("failed to decode RAG search matches: %w", err)
 	}
+	return searchResp.Matches, nil
+}
 
-	if len(searchResp.Matches) == 0 {
-		return nil, fmt.Errorf("RAG search returned 0 matches")
+// queryRAGAndParse runs one retrieval query per hobby instead of one blended query covering the
+// whole profile. Catalog text describes products/activities, never customer demographics, so
+// keeping family size/income/location out of the embedded query avoids diluting the semantic
+// match with vocabulary the catalog never uses. Per-hobby search also ensures a customer with
+// multiple distinct interests (e.g. "trekking, swimming") gets coverage across both, instead of
+// a single blended query letting one dominant hobby crowd out the other in the results.
+func queryRAGAndParse(ctx *workflow.Context, hobbies []string) ([]recommendation.Candidate, RAGDebugInfo, error) {
+	debug := RAGDebugInfo{}
+
+	queryHobbies := hobbies
+	if len(queryHobbies) == 0 {
+		queryHobbies = []string{"general everyday use"}
 	}
 
-	log.Printf("[TraceID: %s] [JobID: %s] [RAG] Qdrant search results received from Python sidecar:", ctx.TraceID, ctx.JobID)
-	for i, match := range searchResp.Matches {
-		log.Printf("[RAG Result #%d] Page: %d, Score: %f, Images: %v, Content Length: %d characters", i+1, match.PageNumber, match.Score, match.Images, len(match.Content))
+	const perHobbyLimit = 4
+	const maxCombinedMatches = 6
+
+	merged := make(map[int]ragMatch)
+	var issuedQueries []string
+
+	for _, hobby := range queryHobbies {
+		hobby = strings.TrimSpace(hobby)
+		if hobby == "" {
+			continue
+		}
+		queryText := fmt.Sprintf("Gear and equipment for %s.", hobby)
+		issuedQueries = append(issuedQueries, queryText)
+
+		matches, err := searchRAGOnce(ctx, queryText, perHobbyLimit)
+		if err != nil {
+			log.Printf("[TraceID: %s] [JobID: %s] [RAG] [WARNING] search failed for hobby %q: %v", ctx.TraceID, ctx.JobID, hobby, err)
+			continue
+		}
+		for _, m := range matches {
+			if existing, ok := merged[m.PageNumber]; !ok || m.Score > existing.Score {
+				merged[m.PageNumber] = m
+			}
+		}
+	}
+
+	debug.Query = strings.Join(issuedQueries, " | ")
+
+	if len(merged) == 0 {
+		return nil, debug, fmt.Errorf("RAG search returned 0 matches across %d hobby queries", len(issuedQueries))
+	}
+
+	mergedList := make([]ragMatch, 0, len(merged))
+	for _, m := range merged {
+		mergedList = append(mergedList, m)
+	}
+	sort.Slice(mergedList, func(i, j int) bool { return mergedList[i].Score > mergedList[j].Score })
+	if len(mergedList) > maxCombinedMatches {
+		mergedList = mergedList[:maxCombinedMatches]
+	}
+
+	for _, m := range mergedList {
+		debug.Matches = append(debug.Matches, RAGDebugHit{
+			PageNumber: m.PageNumber,
+			Score:      m.Score,
+			ImageCount: len(m.Images),
+			ContentLen: len(m.Content),
+		})
+	}
+	debug.MatchCount = len(mergedList)
+
+	log.Printf("[TraceID: %s] [JobID: %s] [RAG] Merged search results across %d hobby queries:", ctx.TraceID, ctx.JobID, len(issuedQueries))
+	for i, m := range mergedList {
+		log.Printf("[RAG Result #%d] Page: %d, Score: %f, Images: %v, Content Length: %d characters", i+1, m.PageNumber, m.Score, m.Images, len(m.Content))
 	}
 
 	var buffer bytes.Buffer
-	for _, match := range searchResp.Matches {
-		buffer.WriteString(fmt.Sprintf("--- PAGE %d ---\n%s\n", match.PageNumber, match.Content))
+	for _, m := range mergedList {
+		buffer.WriteString(fmt.Sprintf("--- PAGE %d ---\n%s\n", m.PageNumber, m.Content))
 	}
 	matchedText := buffer.String()
 
@@ -298,6 +395,12 @@ For each item, respond with a JSON object matching this structure:
 }
 If pricing or specific specs are not listed, make a highly accurate estimate.
 
+IMPORTANT: You MUST produce at least one item per matched page below, even if the page reads
+like marketing copy rather than a clean spec sheet. If no distinct product name is stated,
+infer the product category from context (hobbies, imagery cues, section headings) and use that
+as the model name (e.g. "Trekking Backpack" or "Camping Tent Package") rather than omitting the
+page. Never return an empty array - a best-effort estimate is always preferred over nothing.
+
 Matched Pages Content:
 %s
 
@@ -305,15 +408,15 @@ Respond with a JSON array containing these objects. Do not output any markdown f
 
 	var parsedItems []recommendation.Product
 
-	err = workflow.CallGemini(ctx, prompt, &parsedItems)
+	err := workflow.CallGemini(ctx, prompt, &parsedItems)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse matched pages using Gemini: %w", err)
+		return nil, debug, fmt.Errorf("failed to parse matched pages using Gemini: %w", err)
 	}
 
 	var candidates []recommendation.Candidate
 	for _, p := range parsedItems {
 		// Lookup original matching RAG hit to copy its page-extracted image
-		for _, match := range searchResp.Matches {
+		for _, match := range mergedList {
 			if match.PageNumber == p.PageNumber && len(match.Images) > 0 {
 				p.HeroImage = match.Images[0]
 				break
@@ -322,5 +425,5 @@ Respond with a JSON array containing these objects. Do not output any markdown f
 
 		candidates = append(candidates, p)
 	}
-	return candidates, nil
+	return candidates, debug, nil
 }

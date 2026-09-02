@@ -12,7 +12,8 @@ def audit_copy(copy: dict, candidate: dict) -> dict:
         }
 
     genai.configure(api_key=api_key)
-    model = genai.GenerativeModel('gemini-3.5-flash')
+    gemini_model = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
+    model = genai.GenerativeModel(gemini_model)
 
     prompt = f"""You are an audit agent (Spec Critic).
 Your job is to compare the drafted marketing copy against the official product specifications and verify that all claims are accurate.
