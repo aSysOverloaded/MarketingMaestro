@@ -4,6 +4,8 @@ from fastapi import FastAPI, HTTPException, UploadFile, File, Header
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 
+from app.config import log_startup_config
+from app.observability import log_stage
 from app.ai.planner import generate_plan
 from app.ai.writer import generate_copy
 from app.ai.critic import audit_copy
@@ -14,8 +16,14 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(name)s] %(levelname)s %(message)s",
 )
+logger = logging.getLogger("main")
 
 app = FastAPI(title="AI Services Python Sidecar")
+
+
+@app.on_event("startup")
+def _log_config_on_startup():
+    log_startup_config()
 
 class PlanRequest(BaseModel):
     segment: str
@@ -54,38 +62,42 @@ class EvaluateResponse(BaseModel):
 
 
 @app.post("/api/plan", response_model=PlanResponse)
-def plan_endpoint(payload: PlanRequest):
+def plan_endpoint(payload: PlanRequest, x_job_id: Optional[str] = Header(default="unknown")):
     try:
         sections = generate_plan(payload.segment, payload.recommendation)
         return PlanResponse(sections=sections)
     except Exception as e:
+        log_stage(logger, x_job_id, "plan", f"failed: {e}", level="warning")
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/write", response_model=WriteResponse)
-def write_endpoint(payload: WriteRequest):
+def write_endpoint(payload: WriteRequest, x_job_id: Optional[str] = Header(default="unknown")):
     try:
         copy_data = generate_copy(payload.segment, payload.sections, payload.candidate)
         return WriteResponse(**copy_data)
     except Exception as e:
+        log_stage(logger, x_job_id, "write", f"failed: {e}", level="warning")
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/critic", response_model=CriticResponse)
-def critic_endpoint(payload: CriticRequest):
+def critic_endpoint(payload: CriticRequest, x_job_id: Optional[str] = Header(default="unknown")):
     try:
         result = audit_copy(payload.copy, payload.candidate)
         return CriticResponse(**result)
     except Exception as e:
+        log_stage(logger, x_job_id, "critic", f"failed: {e}", level="warning")
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/evaluate", response_model=EvaluateResponse)
-def evaluate_endpoint(payload: EvaluateRequest):
+def evaluate_endpoint(payload: EvaluateRequest, x_job_id: Optional[str] = Header(default="unknown")):
     try:
         result = evaluate_copy(payload.copy)
         return EvaluateResponse(**result)
     except Exception as e:
+        log_stage(logger, x_job_id, "evaluate", f"failed: {e}", level="warning")
         raise HTTPException(status_code=500, detail=str(e))
 
 class SearchRequest(BaseModel):

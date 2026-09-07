@@ -72,7 +72,14 @@ func (s *WriterStep) Execute(ctx *workflow.Context) (workflow.Result, error) {
 
 	client := &http.Client{Timeout: 15 * time.Second}
 	reqUrl := fmt.Sprintf("%s/api/write", pythonUrl)
-	resp, err := client.Post(reqUrl, "application/json", bytes.NewBuffer(jsonBytes))
+	req, err := http.NewRequest("POST", reqUrl, bytes.NewBuffer(jsonBytes))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create writer request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Job-ID", ctx.JobID)
+
+	resp, err := client.Do(req)
 
 	if err != nil {
 		log.Printf("[TraceID: %s] [JobID: %s] [WriterStep] [FALLBACK] Failed to contact Python Writer API: %v. Using local simulation fallback.", ctx.TraceID, ctx.JobID, err)

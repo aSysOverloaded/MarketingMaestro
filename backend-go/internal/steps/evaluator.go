@@ -55,7 +55,14 @@ func (s *EvaluatorStep) Execute(ctx *workflow.Context) (workflow.Result, error) 
 
 	client := &http.Client{Timeout: 10 * time.Second}
 	reqUrl := fmt.Sprintf("%s/api/evaluate", pythonUrl)
-	resp, err := client.Post(reqUrl, "application/json", bytes.NewBuffer(jsonBytes))
+	req, err := http.NewRequest("POST", reqUrl, bytes.NewBuffer(jsonBytes))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create evaluator request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Job-ID", ctx.JobID)
+
+	resp, err := client.Do(req)
 
 	if err != nil {
 		log.Printf("[TraceID: %s] [JobID: %s] [EvaluatorStep] [FALLBACK] Failed to contact Python Evaluator API: %v. Running local fallback checks.", ctx.TraceID, ctx.JobID, err)

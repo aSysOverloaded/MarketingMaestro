@@ -8,6 +8,9 @@ from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
 import google.generativeai as genai
 
+from app import diagnostics
+from app.observability import log_stage
+
 logger = logging.getLogger("rag")
 
 # Initialize the Qdrant client in memory (100% free, local)
@@ -16,14 +19,6 @@ COLLECTION_NAME = "catalog_products"
 VECTOR_DIMENSION = 768  # text-embedding-004 was retired; gemini-embedding-001 defaults to 3072
                         # dims but supports output_dimensionality to request this size instead
 EMBEDDING_MODEL = "models/gemini-embedding-001"
-
-# Tracks metadata about the last successful ingest for the /api/rag/stats endpoint
-_last_ingest_meta = {}
-
-# Tracks whether the most recent embedding call actually used the real API or fell
-# back to the mock constant vector, and why - a set GEMINI_API_KEY doesn't guarantee
-# the calls succeed (bad key, quota, wrong model name, etc. all fall back silently).
-_last_embed_status = {"mode": "unknown", "detail": None}
 
 def initialize_collection():
     client.recreate_collection(
@@ -36,7 +31,7 @@ def embed_text(text: str, is_query: bool = False) -> list:
     if not api_key:
         msg = "GEMINI_API_KEY is not set in this process's environment"
         logger.warning(f"[embed_text] {msg}, using mock vector fallback (retrieval scores will all be ~1.000 and meaningless)")
-        _last_embed_status.update({"mode": "mock", "detail": msg})
+        diagnostics.set_status("embeddings", "mock", msg)
         return [0.1] * VECTOR_DIMENSION
 
     genai.configure(api_key=api_key)
@@ -48,12 +43,12 @@ def embed_text(text: str, is_query: bool = False) -> list:
             task_type=task_type,
             output_dimensionality=VECTOR_DIMENSION,
         )
-        _last_embed_status.update({"mode": "real", "detail": None})
+        diagnostics.set_status("embeddings", "real", None)
         return result["embedding"]
     except Exception as e:
         # Fallback in case of rate limits or transient issues
         logger.warning(f"[embed_text] embedding failed, using mock vector fallback: {e}")
-        _last_embed_status.update({"mode": "mock", "detail": str(e)})
+        diagnostics.set_status("embeddings", "mock", str(e))
         return [0.1] * VECTOR_DIMENSION
 
 def embed_texts(texts: list, is_query: bool = False) -> list:
@@ -61,7 +56,7 @@ def embed_texts(texts: list, is_query: bool = False) -> list:
     if not api_key:
         msg = "GEMINI_API_KEY is not set in this process's environment"
         logger.warning(f"[embed_texts] {msg}, using mock vectors for {len(texts)} texts (retrieval scores will all be ~1.000 and meaningless)")
-        _last_embed_status.update({"mode": "mock", "detail": msg})
+        diagnostics.set_status("embeddings", "mock", msg)
         return [[0.1] * VECTOR_DIMENSION] * len(texts)
 
     genai.configure(api_key=api_key)
@@ -73,16 +68,16 @@ def embed_texts(texts: list, is_query: bool = False) -> list:
             task_type=task_type,
             output_dimensionality=VECTOR_DIMENSION,
         )
-        _last_embed_status.update({"mode": "real", "detail": None})
+        diagnostics.set_status("embeddings", "real", None)
         return result["embedding"]
     except Exception as e:
         logger.warning(f"[embed_texts] batch embedding failed for {len(texts)} texts, using mock vectors: {e}")
-        _last_embed_status.update({"mode": "mock", "detail": str(e)})
+        diagnostics.set_status("embeddings", "mock", str(e))
         return [[0.1] * VECTOR_DIMENSION] * len(texts)
 
 def ingest_pdf(pdf_bytes: bytes, job_id: str = "unknown") -> dict:
     start = time.monotonic()
-    logger.info(f"[job={job_id}] [ingest] starting ingest of {len(pdf_bytes)} bytes")
+    log_stage(logger, job_id, "ingest", f"starting ingest of {len(pdf_bytes)} bytes")
 
     # 1. Clear and create the Qdrant collection
     initialize_collection()
@@ -130,7 +125,7 @@ def ingest_pdf(pdf_bytes: bytes, job_id: str = "unknown") -> dict:
                 image_paths.append(f"/storage/extracted_images/{img_name}")
         except Exception as e:
             image_extract_failures += 1
-            logger.warning(f"[job={job_id}] [ingest] failed to extract images on page {i+1}: {e}")
+            log_stage(logger, job_id, "ingest", f"failed to extract images on page {i+1}: {e}", level="warning")
 
         pages_to_embed.append(text)
         page_details.append({
@@ -162,7 +157,7 @@ def ingest_pdf(pdf_bytes: bytes, job_id: str = "unknown") -> dict:
         )
 
     duration_ms = int((time.monotonic() - start) * 1000)
-    _last_ingest_meta.update({
+    diagnostics.set_ingest_meta({
         "job_id": job_id,
         "indexed_pages": indexed_count,
         "skipped_empty_pages": skipped_empty_pages,
@@ -170,8 +165,9 @@ def ingest_pdf(pdf_bytes: bytes, job_id: str = "unknown") -> dict:
         "total_pages": len(reader.pages),
         "duration_ms": duration_ms,
     })
-    logger.info(
-        f"[job={job_id}] [ingest] done: indexed={indexed_count} skipped_empty={skipped_empty_pages} "
+    log_stage(
+        logger, job_id, "ingest",
+        f"done: indexed={indexed_count} skipped_empty={skipped_empty_pages} "
         f"image_failures={image_extract_failures} total_pages={len(reader.pages)} duration_ms={duration_ms}"
     )
 
@@ -184,8 +180,9 @@ def ingest_pdf(pdf_bytes: bytes, job_id: str = "unknown") -> dict:
 def get_stats() -> dict:
     # embeddings_mode reflects the outcome of the LAST actual embed_content call, not just
     # whether GEMINI_API_KEY is set - a set key doesn't guarantee the calls are succeeding.
-    embeddings_mode = _last_embed_status["mode"]
-    embeddings_detail = _last_embed_status["detail"]
+    embed_status = diagnostics.get_status("embeddings")
+    embeddings_mode = embed_status["mode"]
+    embeddings_detail = embed_status["detail"]
 
     collections = client.get_collections().collections
     collection_exists = any(c.name == COLLECTION_NAME for c in collections)
@@ -193,7 +190,7 @@ def get_stats() -> dict:
         return {
             "collection_exists": False,
             "point_count": 0,
-            "last_ingest": _last_ingest_meta or None,
+            "last_ingest": diagnostics.get_ingest_meta(),
             "embeddings_mode": embeddings_mode,
             "embeddings_detail": embeddings_detail,
         }
@@ -202,7 +199,7 @@ def get_stats() -> dict:
     return {
         "collection_exists": True,
         "point_count": info.points_count,
-        "last_ingest": _last_ingest_meta or None,
+        "last_ingest": diagnostics.get_ingest_meta(),
         "embeddings_mode": embeddings_mode,
         "embeddings_detail": embeddings_detail,
     }
@@ -214,7 +211,7 @@ def search_catalog(query: str, limit: int = 3, job_id: str = "unknown") -> list:
     collections = client.get_collections().collections
     collection_exists = any(c.name == COLLECTION_NAME for c in collections)
     if not collection_exists:
-        logger.warning(f"[job={job_id}] [search] query='{query}' collection does not exist yet, returning 0 matches")
+        log_stage(logger, job_id, "search", f"query='{query}' collection does not exist yet, returning 0 matches", level="warning")
         return []
 
     # 1. Generate query vector embedding
@@ -229,13 +226,13 @@ def search_catalog(query: str, limit: int = 3, job_id: str = "unknown") -> list:
 
     duration_ms = int((time.monotonic() - start) * 1000)
     if not search_results:
-        logger.warning(f"[job={job_id}] [search] query='{query}' returned 0 matches (duration_ms={duration_ms})")
+        log_stage(logger, job_id, "search", f"query='{query}' returned 0 matches (duration_ms={duration_ms})", level="warning")
     else:
         scores = [f"{hit.score:.3f}" for hit in search_results]
         pages = [hit.payload.get("page_number") for hit in search_results]
-        logger.info(
-            f"[job={job_id}] [search] query='{query}' matches={len(search_results)} "
-            f"scores={scores} pages={pages} duration_ms={duration_ms}"
+        log_stage(
+            logger, job_id, "search",
+            f"query='{query}' matches={len(search_results)} scores={scores} pages={pages} duration_ms={duration_ms}"
         )
 
     # 3. Format and return matched payloads including images

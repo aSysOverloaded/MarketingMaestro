@@ -46,6 +46,9 @@ __pycache__/
 .env.production.local
 *.env
 *.env.*
+# .env.example files are templates, not secrets - they should be committed
+!.env.example
+!*.env.example
 
 # Generated storage artifacts
 /backend-go/storage/
