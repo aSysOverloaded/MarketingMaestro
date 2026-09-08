@@ -9,6 +9,7 @@ from qdrant_client.models import Distance, VectorParams, PointStruct
 import google.generativeai as genai
 
 from app import diagnostics
+from app.config import settings
 from app.observability import log_stage
 
 logger = logging.getLogger("rag")
@@ -27,9 +28,9 @@ def initialize_collection():
     )
 
 def embed_text(text: str, is_query: bool = False) -> list:
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        msg = "GEMINI_API_KEY is not set in this process's environment"
+    api_key = settings.gemini_api_key
+    if not settings.has_gemini_key:
+        msg = "GEMINI_API_KEY is not set (checked via app.config.settings, not the raw process environment)"
         logger.warning(f"[embed_text] {msg}, using mock vector fallback (retrieval scores will all be ~1.000 and meaningless)")
         diagnostics.set_status("embeddings", "mock", msg)
         return [0.1] * VECTOR_DIMENSION
@@ -52,9 +53,9 @@ def embed_text(text: str, is_query: bool = False) -> list:
         return [0.1] * VECTOR_DIMENSION
 
 def embed_texts(texts: list, is_query: bool = False) -> list:
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        msg = "GEMINI_API_KEY is not set in this process's environment"
+    api_key = settings.gemini_api_key
+    if not settings.has_gemini_key:
+        msg = "GEMINI_API_KEY is not set (checked via app.config.settings, not the raw process environment)"
         logger.warning(f"[embed_texts] {msg}, using mock vectors for {len(texts)} texts (retrieval scores will all be ~1.000 and meaningless)")
         diagnostics.set_status("embeddings", "mock", msg)
         return [[0.1] * VECTOR_DIMENSION] * len(texts)

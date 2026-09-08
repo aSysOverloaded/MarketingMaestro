@@ -64,7 +64,7 @@ class EvaluateResponse(BaseModel):
 @app.post("/api/plan", response_model=PlanResponse)
 def plan_endpoint(payload: PlanRequest, x_job_id: Optional[str] = Header(default="unknown")):
     try:
-        sections = generate_plan(payload.segment, payload.recommendation)
+        sections = generate_plan(payload.segment, payload.recommendation, job_id=x_job_id)
         return PlanResponse(sections=sections)
     except Exception as e:
         log_stage(logger, x_job_id, "plan", f"failed: {e}", level="warning")
@@ -74,7 +74,7 @@ def plan_endpoint(payload: PlanRequest, x_job_id: Optional[str] = Header(default
 @app.post("/api/write", response_model=WriteResponse)
 def write_endpoint(payload: WriteRequest, x_job_id: Optional[str] = Header(default="unknown")):
     try:
-        copy_data = generate_copy(payload.segment, payload.sections, payload.candidate)
+        copy_data = generate_copy(payload.segment, payload.sections, payload.candidate, job_id=x_job_id)
         return WriteResponse(**copy_data)
     except Exception as e:
         log_stage(logger, x_job_id, "write", f"failed: {e}", level="warning")
@@ -84,7 +84,7 @@ def write_endpoint(payload: WriteRequest, x_job_id: Optional[str] = Header(defau
 @app.post("/api/critic", response_model=CriticResponse)
 def critic_endpoint(payload: CriticRequest, x_job_id: Optional[str] = Header(default="unknown")):
     try:
-        result = audit_copy(payload.copy, payload.candidate)
+        result = audit_copy(payload.copy, payload.candidate, job_id=x_job_id)
         return CriticResponse(**result)
     except Exception as e:
         log_stage(logger, x_job_id, "critic", f"failed: {e}", level="warning")
@@ -94,7 +94,7 @@ def critic_endpoint(payload: CriticRequest, x_job_id: Optional[str] = Header(def
 @app.post("/api/evaluate", response_model=EvaluateResponse)
 def evaluate_endpoint(payload: EvaluateRequest, x_job_id: Optional[str] = Header(default="unknown")):
     try:
-        result = evaluate_copy(payload.copy)
+        result = evaluate_copy(payload.copy, job_id=x_job_id)
         return EvaluateResponse(**result)
     except Exception as e:
         log_stage(logger, x_job_id, "evaluate", f"failed: {e}", level="warning")

@@ -1,51 +1,45 @@
-import os
 import json
-import google.generativeai as genai
+import logging
 
-def audit_copy(copy: dict, candidate: dict) -> dict:
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        # Offline fallback (always pass)
-        return {
-            "passed": True,
-            "feedback": "Offline validation pass: specs align with local files."
-        }
+from langchain_core.prompts import ChatPromptTemplate
 
-    genai.configure(api_key=api_key)
-    gemini_model = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
-    model = genai.GenerativeModel(gemini_model)
+from app import diagnostics
+from app.ai.llm import get_chat_model
+from app.ai.schemas import CriticOutput
+from app.observability import log_stage
 
-    prompt = f"""You are an audit agent (Spec Critic).
+logger = logging.getLogger("ai.critic")
+
+PROMPT = ChatPromptTemplate.from_template(
+    """You are an audit agent (Spec Critic).
 Your job is to compare the drafted marketing copy against the official product specifications and verify that all claims are accurate.
 If the copy references numbers, features, or metrics that DO NOT exist or contradict the specifications sheet, fail the validation.
 
 Drafted Marketing Copy:
-{json.dumps(copy)}
+{copy}
 
 Official Product Specifications:
-{json.dumps(candidate)}
+{candidate}
 
-Determine if the copy has passed or failed the audit. If failed, provide correction feedback outlining which specs were incorrect.
-Output a valid JSON object matching this structure:
-{{
-  "passed": true / false,
-  "feedback": "Details on what specs failed, or 'Specification audit passed successfully.'"
-}}
+Determine if the copy has passed or failed the audit. If failed, provide correction feedback outlining which specs were incorrect."""
+)
 
-Only return a valid JSON object. Do not include markdown formatting or extra text.
-"""
-    try:
-        response = model.generate_content(
-            prompt,
-            generation_config={"response_mime_type": "application/json"}
-        )
-        data = json.loads(response.text)
-        return {
-            "passed": bool(data.get("passed", True)),
-            "feedback": data.get("feedback", "Specification audit passed successfully.")
-        }
-    except Exception as e:
-        return {
-            "passed": True,
-            "feedback": f"Validation bypassed due to system error: {str(e)}"
-        }
+
+def audit_copy(copy: dict, candidate: dict, job_id: str = "unknown") -> dict:
+    llm = get_chat_model("critic")
+    chain = PROMPT | llm.with_structured_output(CriticOutput, include_raw=True)
+
+    result = chain.invoke({
+        "copy": json.dumps(copy),
+        "candidate": json.dumps(candidate),
+    })
+
+    if result["parsing_error"] or result["parsed"] is None:
+        diagnostics.set_status("llm.critic", "failed", str(result["parsing_error"]))
+        log_stage(logger, job_id, "critic", f"structured output failed: {result['parsing_error']}", level="warning")
+        raise RuntimeError(f"critic structured output failed: {result['parsing_error']}")
+
+    diagnostics.set_status("llm.critic", "real", None)
+    log_stage(logger, job_id, "critic", f"raw={result['raw']}")
+
+    return result["parsed"].model_dump()

@@ -1,60 +1,46 @@
-import os
 import json
-import google.generativeai as genai
+import logging
 
-def generate_copy(segment: str, sections: list, candidate: dict) -> dict:
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        # Offline fallback mock data
-        model_name = candidate.get("Model", "Premium Product Selection")
-        return {
-            "headline": f"Dynamic Living Meets Modern Performance",
-            "subheadline": f"Tailored perfectly for your {segment} lifestyle parameters.",
-            "paragraphs": [
-                f"We are excited to spotlight the {model_name}. Engineered to meet the high standards of a {segment} profile, this choice blends premium capacity with smart convenience features.",
-                "With state-of-the-art efficiency, whisper-quiet operations, and fingerprint resistant finishes, this selection elevates your everyday routine seamlessly."
-            ],
-            "cta": "Arrange a live interactive demonstration or consult with a product specialist today."
-        }
+from langchain_core.prompts import ChatPromptTemplate
 
-    genai.configure(api_key=api_key)
-    gemini_model = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
-    model = genai.GenerativeModel(gemini_model)
+from app import diagnostics
+from app.ai.llm import get_chat_model
+from app.ai.schemas import WriterOutput
+from app.observability import log_stage
 
-    prompt = f"""You are a professional copywriter agent. Write persuasive copy for a personalized marketing brochure.
+logger = logging.getLogger("ai.writer")
+
+PROMPT = ChatPromptTemplate.from_template(
+    """You are a professional copywriter agent. Write persuasive copy for a personalized marketing brochure.
 Customer Segment: {segment}
-Brochure Outline: {json.dumps(sections)}
-Product Specifications: {json.dumps(candidate)}
+Brochure Outline: {sections}
+Product Specifications: {candidate}
 
-Output a valid JSON object matching this structure exactly:
-{{
-  "headline": "A short, catchy, benefit-driven headline",
-  "subheadline": "A supporting subheadline highlighting suitability",
-  "paragraphs": [
-     "Paragraph 1 expanding on the planner outline points and product specifications.",
-     "Paragraph 2 highlighting dynamic everyday convenience features."
-  ],
-  "cta": "Action-oriented CTA text (e.g. Schedule a live demonstration or contact our sales specialists)"
-}}
+Write a headline, subheadline, body paragraphs expanding on the planner outline points and product
+specifications, and an action-oriented CTA (e.g. Schedule a live demonstration or contact our sales specialists)."""
+)
 
-Only return a valid JSON object. Do not include markdown formatting or extra text.
-"""
-    try:
-        response = model.generate_content(
-            prompt,
-            generation_config={"response_mime_type": "application/json"}
-        )
-        data = json.loads(response.text)
-        return {
-            "headline": data.get("headline", "Premium Curation Selection"),
-            "subheadline": data.get("subheadline", "Sophisticated style meets efficiency."),
-            "paragraphs": data.get("paragraphs", ["Tailored brochure copy content for your selection."]),
-            "cta": data.get("cta", "Request a live demonstration today.")
-        }
-    except Exception as e:
-        return {
-            "headline": "Premium Curation Selection",
-            "subheadline": "Sophisticated style meets high-efficiency features.",
-            "paragraphs": ["Tailored brochure copy content written for your selection."],
-            "cta": "Schedule a product demonstration."
-        }
+
+def generate_copy(segment: str, sections: list, candidate: dict, job_id: str = "unknown") -> dict:
+    llm = get_chat_model("writer")
+    chain = PROMPT | llm.with_structured_output(WriterOutput, include_raw=True)
+
+    result = chain.invoke({
+        "segment": segment,
+        "sections": json.dumps(sections),
+        "candidate": json.dumps(candidate),
+    })
+
+    if result["parsing_error"] or result["parsed"] is None:
+        diagnostics.set_status("llm.writer", "failed", str(result["parsing_error"]))
+        log_stage(logger, job_id, "write", f"structured output failed: {result['parsing_error']}", level="warning")
+        raise RuntimeError(f"writer structured output failed: {result['parsing_error']}")
+
+    diagnostics.set_status("llm.writer", "real", None)
+    log_stage(logger, job_id, "write", f"raw={result['raw']}")
+
+    parsed: WriterOutput = result["parsed"]
+    if len(parsed.paragraphs) == 0:
+        log_stage(logger, job_id, "write", "parsed OK but paragraphs is empty", level="warning")
+
+    return parsed.model_dump()

@@ -70,7 +70,7 @@ func (s *WriterStep) Execute(ctx *workflow.Context) (workflow.Result, error) {
 		return nil, fmt.Errorf("failed to marshal writer payload: %w", err)
 	}
 
-	client := &http.Client{Timeout: 15 * time.Second}
+	client := &http.Client{Timeout: 45 * time.Second}
 	reqUrl := fmt.Sprintf("%s/api/write", pythonUrl)
 	req, err := http.NewRequest("POST", reqUrl, bytes.NewBuffer(jsonBytes))
 	if err != nil {

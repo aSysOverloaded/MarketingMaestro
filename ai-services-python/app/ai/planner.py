@@ -1,63 +1,43 @@
-import os
 import json
-import google.generativeai as genai
+import logging
 
-def generate_plan(segment: str, recommendation: dict) -> list:
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        # Offline fallback mock data
-        return [
-            {
-                "title": "Welcome and Overview",
-                "points": [
-                    "Acknowledge the customer's lifestyle goals and segment parameters.",
-                    "Present a warm, welcoming introduction mapping to their category profile."
-                ]
-            },
-            {
-                "title": "Why This Selection Fits Your Family",
-                "points": [
-                    "Highlight large cooking capacities and Flex Duo versatility.",
-                    "Elaborate on certified reliability and smart home convenience functions."
-                ]
-            },
-            {
-                "title": "Premium Technical Highlights",
-                "points": [
-                    "Focus on dual fuel precision heat and slide-in ergonomic configuration.",
-                    "Outline finish options (e.g. fingerprint resistant stainless steel) and dimensions."
-                ]
-            }
-        ]
+from langchain_core.prompts import ChatPromptTemplate
 
-    genai.configure(api_key=api_key)
-    gemini_model = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
-    model = genai.GenerativeModel(gemini_model)
-    
-    prompt = f"""You are a content planning agent. Your task is to plan the sections of a personalized marketing brochure.
+from app import diagnostics
+from app.ai.llm import get_chat_model
+from app.ai.schemas import PlannerOutput
+from app.observability import log_stage
+
+logger = logging.getLogger("ai.planner")
+
+PROMPT = ChatPromptTemplate.from_template(
+    """You are a content planning agent. Your task is to plan the sections of a personalized marketing brochure.
 Customer Segment: {segment}
-Recommended Product: {json.dumps(recommendation)}
+Recommended Product: {recommendation}
 
-Output a JSON array of sections. Each section must be an object with:
-- "title": Title of the brochure page/section (string)
-- "points": Key items and writing points to cover in this section (list of strings)
+Plan the sections of the brochure. Each section needs a title and a list of key writing points to cover."""
+)
 
-Only return a valid JSON array. Do not include markdown formatting or extra text.
-"""
-    try:
-        response = model.generate_content(
-            prompt,
-            generation_config={"response_mime_type": "application/json"}
-        )
-        data = json.loads(response.text)
-        if isinstance(data, list):
-            return data
-        elif isinstance(data, dict) and "sections" in data:
-            return data["sections"]
-        return []
-    except Exception as e:
-        # Safe fallback
-        return [
-            {"title": "Product Overview", "points": ["Introduction", "Why it fits your profile"]},
-            {"title": "Specifications & Features", "points": ["Key technical highlights", "Certified benefits"]}
-        ]
+
+def generate_plan(segment: str, recommendation: dict, job_id: str = "unknown") -> list:
+    llm = get_chat_model("planner")
+    chain = PROMPT | llm.with_structured_output(PlannerOutput, include_raw=True)
+
+    result = chain.invoke({
+        "segment": segment,
+        "recommendation": json.dumps(recommendation),
+    })
+
+    if result["parsing_error"] or result["parsed"] is None:
+        diagnostics.set_status("llm.planner", "failed", str(result["parsing_error"]))
+        log_stage(logger, job_id, "plan", f"structured output failed: {result['parsing_error']}", level="warning")
+        raise RuntimeError(f"planner structured output failed: {result['parsing_error']}")
+
+    diagnostics.set_status("llm.planner", "real", None)
+    log_stage(logger, job_id, "plan", f"raw={result['raw']}")
+
+    parsed: PlannerOutput = result["parsed"]
+    if len(parsed.sections) == 0:
+        log_stage(logger, job_id, "plan", "parsed OK but sections is empty", level="warning")
+
+    return [section.model_dump() for section in parsed.sections]

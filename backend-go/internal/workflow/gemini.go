@@ -83,7 +83,7 @@ func CallGemini(ctx *Context, prompt string, target interface{}) error {
 
 	if apiUrl != "" && apiKey != "" {
 		if model == "" {
-			model = "minimax/minimax-m2.7:free" // Default free OpenRouter model - check LLM_MODEL if this 404s later, OpenRouter's free lineup rotates
+			model = "nvidia/nemotron-3-super-120b-a12b:free" // Default free OpenRouter model - check LLM_MODEL if this 404s later, OpenRouter's free lineup rotates
 		}
 		return CallOpenAICompatible(ctx, apiUrl, apiKey, model, prompt, target)
 	}
@@ -486,9 +486,16 @@ func simulateFallback(prompt string, target interface{}) error {
 		return json.Unmarshal([]byte(mockJSON), target)
 
 	case *[]recommendation.Product:
-		// Attempt to dynamically parse matching pages and text from the RAG search prompt content
+		// Attempt to dynamically parse matching pages and text from the RAG search prompt content.
+		// Must start scanning AFTER the "Matched Pages Content:" marker - the prompt's own JSON
+		// schema instructions contain a literal example "--- PAGE 3 ---" earlier in the text, and
+		// scanning from position 0 picks that up as a fake page, extracting the following
+		// instruction sentence as a bogus "product name" instead of any real catalog content.
 		var products []recommendation.Product
-		idx := 0
+		idx := strings.Index(prompt, "Matched Pages Content:")
+		if idx == -1 {
+			idx = 0
+		}
 		for {
 			pagePos := strings.Index(prompt[idx:], "--- PAGE ")
 			if pagePos == -1 {
