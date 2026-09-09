@@ -2,6 +2,7 @@ import os
 import io
 import time
 import uuid
+import hashlib
 import logging
 import pypdf
 from qdrant_client import QdrantClient
@@ -17,6 +18,15 @@ logger = logging.getLogger("rag")
 # Initialize the Qdrant client in memory (100% free, local)
 client = QdrantClient(":memory:")
 COLLECTION_NAME = "catalog_products"
+
+# Content hash of the PDF currently held in the in-memory collection, and the ingest
+# result that produced it. A re-upload of byte-identical content (e.g. clicking
+# Analyze again after a downstream step like CriticStep rejects the copy) skips
+# re-embedding entirely instead of burning Gemini embedding quota for no reason -
+# the catalog itself didn't change, only something later in the pipeline failed.
+# Reset to None whenever the process restarts, since the in-memory index is too.
+_last_ingested_hash = None
+_last_ingest_result = None
 VECTOR_DIMENSION = 768  # text-embedding-004 was retired; gemini-embedding-001 defaults to 3072
                         # dims but supports output_dimensionality to request this size instead
 EMBEDDING_MODEL = "models/gemini-embedding-001"
@@ -77,6 +87,16 @@ def embed_texts(texts: list, is_query: bool = False) -> list:
         return [[0.1] * VECTOR_DIMENSION] * len(texts)
 
 def ingest_pdf(pdf_bytes: bytes, job_id: str = "unknown") -> dict:
+    global _last_ingested_hash, _last_ingest_result
+
+    content_hash = hashlib.sha256(pdf_bytes).hexdigest()
+    collections = client.get_collections().collections
+    collection_exists = any(c.name == COLLECTION_NAME for c in collections)
+
+    if collection_exists and content_hash == _last_ingested_hash and _last_ingest_result is not None:
+        log_stage(logger, job_id, "ingest", f"content hash matches currently indexed catalog ({content_hash[:12]}...), skipping re-embed")
+        return _last_ingest_result
+
     start = time.monotonic()
     log_stage(logger, job_id, "ingest", f"starting ingest of {len(pdf_bytes)} bytes")
 
@@ -172,11 +192,14 @@ def ingest_pdf(pdf_bytes: bytes, job_id: str = "unknown") -> dict:
         f"image_failures={image_extract_failures} total_pages={len(reader.pages)} duration_ms={duration_ms}"
     )
 
-    return {
+    result = {
         "success": True,
         "indexed_pages": indexed_count,
         "collection_name": COLLECTION_NAME
     }
+    _last_ingested_hash = content_hash
+    _last_ingest_result = result
+    return result
 
 def get_stats() -> dict:
     # embeddings_mode reflects the outcome of the LAST actual embed_content call, not just

@@ -17,7 +17,13 @@ Brochure Outline: {sections}
 Product Specifications: {candidate}
 
 Write a headline, subheadline, body paragraphs expanding on the planner outline points and product
-specifications, and an action-oriented CTA (e.g. Schedule a live demonstration or contact our sales specialists)."""
+specifications, and an action-oriented CTA (e.g. Schedule a live demonstration or contact our sales specialists).
+
+IMPORTANT: Only reference features, materials, technologies, and specifications explicitly listed in
+Product Specifications above. Do not invent, imply, or add any capability, feature, or claim that is
+not present there, even if it sounds plausible or is common for this type of product. If you want to
+emphasize a quality (e.g. comfort, durability, convenience), tie it explicitly back to one of the
+listed specs rather than introducing a new unlisted feature to support it."""
 )
 
 
