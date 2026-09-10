@@ -130,8 +130,12 @@ def ingest_pdf(pdf_bytes: bytes, job_id: str = "unknown") -> dict:
             skipped_empty_pages += 1
             continue
 
-        # Extract images from this page
-        image_paths = []
+        # Extract images from this page. Sorted largest-pixel-area-first (not extraction
+        # order) so that images[0] - which Go's recommend.go takes unconditionally as the
+        # brochure's hero image - is the most likely candidate to be the actual product
+        # photo rather than a small decorative/lifestyle banner image that happens to be
+        # placed first in the PDF's internal image order.
+        image_entries = []
         try:
             for img_idx, img_file in enumerate(page.images):
                 img_ext = os.path.splitext(img_file.name)[1] if img_file.name else ".png"
@@ -143,10 +147,21 @@ def ingest_pdf(pdf_bytes: bytes, job_id: str = "unknown") -> dict:
                 with open(dest_path, "wb") as f:
                     f.write(img_file.data)
 
-                image_paths.append(f"/storage/extracted_images/{img_name}")
+                area = 0
+                try:
+                    if img_file.image is not None:
+                        width, height = img_file.image.size
+                        area = width * height
+                except Exception:
+                    pass  # keep area=0 - falls to the end of the sort, not an extraction failure
+
+                image_entries.append((area, f"/storage/extracted_images/{img_name}"))
         except Exception as e:
             image_extract_failures += 1
             log_stage(logger, job_id, "ingest", f"failed to extract images on page {i+1}: {e}", level="warning")
+
+        image_entries.sort(key=lambda entry: entry[0], reverse=True)
+        image_paths = [path for _, path in image_entries]
 
         pages_to_embed.append(text)
         page_details.append({
