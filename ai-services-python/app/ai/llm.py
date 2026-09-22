@@ -27,10 +27,11 @@ T = TypeVar("T", bound=BaseModel)
 
 
 def get_chat_model(purpose: str) -> ChatOpenAI:
-    # purpose (e.g. "planner", "writer") is used by callers as the diagnostics
-    # subsystem key (llm.<purpose>) and in job-correlated logging, not here.
+    # purpose (e.g. "planner", "critic") is also the diagnostics key (llm.<purpose>).
+    # Only "critic" can be routed to a different model, via LLM_CRITIC_MODEL.
+    model = settings.llm_critic_model if purpose == "critic" and settings.llm_critic_model else settings.llm_model
     return ChatOpenAI(
-        model=settings.llm_model,
+        model=model,
         openai_api_key=settings.llm_api_key or "unset",
         openai_api_base=settings.llm_api_url,
         timeout=settings.llm_timeout_seconds,

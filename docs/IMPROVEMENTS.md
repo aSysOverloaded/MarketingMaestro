@@ -8,6 +8,42 @@ Open items that have been identified but not yet done live in [Backlog](#backlog
 
 ---
 
+## 2026-09-22 — Deterministic check for invented features in the copy
+
+- **Problem:** The LLM critic passed copy that promised a "SmartThings app" for a fridge whose
+  specs mention no app. It happened in both drafts of the live run, and the second draft
+  shipped in the brochure. The critic handles contradictions ("30 cu. ft." vs 26.5) but misses
+  plausible additions.
+- **Fix, in three layers:**
+  1. New `app/ai/grounding.py::find_ungrounded_terms`: flags terms in the copy that don't
+     appear in the product specs. It checks internal-capital names (SmartThings, ThinQ,
+     iPhone), acronyms (NFC, OLED, AI) and numbers. Comparison ignores case, spacing,
+     punctuation and Unicode hyphens ("WiFi" matches "Wi-Fi"). Short terms must match a whole
+     spec word, because "ai" is a substring of "stainless". It runs first in every review,
+     and flagged terms go to the writer as revision feedback. It is deterministic, so it still
+     runs when the LLM critic is down; the warning now says "only the deterministic spec-term
+     check ran" instead of "NOT fact-checked".
+  2. The critic prompt now treats any unlisted feature, app, service, integration,
+     certification, warranty or capability as a failure, even when plausible.
+  3. New optional `LLM_CRITIC_MODEL` points only the critic at a stronger model (same endpoint
+     and key). Fact-checking is where a weak model hurts most, and it's one call per draft.
+- **Deliberate limits:** ordinary and Title Case words are left to the LLM critic, since
+  checking them deterministically flags every marketing heading. Single-digit integers are
+  skipped because they are usually counts ("3 options"), so an invented "5-year warranty" can
+  still get through to the critic.
+- **Files:** `app/ai/grounding.py` (new), `app/pipeline/brochure.py`, `app/ai/critic.py`,
+  `app/ai/llm.py`, `app/config.py`, `.env.example`
+- **Verified:** Run on both real drafts from the live run, it flags exactly `SmartThings` + the
+  leaked `90` match score (draft 1) and `SmartThings` (draft 2), with no false positives. The
+  LLM critic had approved draft 2. 6 new tests (26 total): the live-run draft, acronyms and
+  numbers, spelling and hyphen variants, short-term whole-word matching, the critic-model
+  override, and a pipeline test showing the grounding check forces a revision even when the
+  critic passes. A fresh live run wasn't possible: the free provider returned
+  `503 provider overloaded` on the writer in two attempts. That was reported correctly as a
+  fallback to generic copy.
+
+---
+
 ## 2026-09-22 — Migrated to a single Python service; Go backend removed
 
 **Why:** The Go backend was mostly glue. Four of its nine steps were HTTP clients that
@@ -166,10 +202,13 @@ style issue.
 
 Identified but not yet done. Ordered roughly by priority.
 
-- **The critic misses invented features.** In the live run it passed copy that mentioned a
-  "SmartThings app" and phone alerts, neither of which is in the product specs. Options: a
-  stronger model for the critic only, or a deterministic pre-check that flags capitalized
-  product and feature names in the copy that don't appear in the specs.
+- **The free model is often overloaded.** OpenRouter's free Nvidia provider returned `503
+  provider overloaded` for most calls in several runs, so the brochure fell back to generic
+  copy. The fallbacks work and are reported, but in practice the product needs a paid or
+  less contended `LLM_MODEL` (and optionally `LLM_CRITIC_MODEL`).
+- **Generic invented claims still rely on the LLM critic.** The grounding check catches
+  branded names, acronyms and numbers. Plain-language additions like "get alerts on your
+  phone" still depend on the critic.
 - **Critic and writer only see the top product**, while the brochure shows up to 4.
 - **Shared global state.** One in-memory Qdrant collection, recreated on every upload, and
   globally named extracted images (`page_N_img_M`). Concurrent users overwrite each other's

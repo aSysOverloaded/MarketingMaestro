@@ -13,7 +13,12 @@ logger = logging.getLogger("ai.critic")
 PROMPT = ChatPromptTemplate.from_template(
     """You are an audit agent (Spec Critic).
 Your job is to compare the drafted marketing copy against the official product specifications and verify that all claims are accurate.
-If the copy references numbers, features, or metrics that DO NOT exist or contradict the specifications sheet, fail the validation.
+Fail the audit if the copy:
+- states a number, feature, or metric that contradicts the specifications, OR
+- mentions any feature, app, service, integration, certification, warranty, or capability that is NOT
+  listed in the specifications - even if it is plausible or commonly true for this kind of product.
+  (Example: promising a companion phone app when the specs list no app is a failure.)
+Subjective benefit language tied to a listed spec ("keeps food fresh" for a listed cooling system) is fine.
 
 Drafted Marketing Copy:
 {copy}
@@ -21,7 +26,7 @@ Drafted Marketing Copy:
 Official Product Specifications:
 {candidate}
 
-Determine if the copy has passed or failed the audit. If failed, provide correction feedback outlining which specs were incorrect."""
+Determine if the copy has passed or failed the audit. If failed, list each unsupported or incorrect claim so the writer can remove or fix it."""
 )
 
 

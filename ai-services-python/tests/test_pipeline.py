@@ -86,3 +86,24 @@ def test_api_recommend_and_send_email(no_llm):
 
     assert client.post("/api/send-email", data={"job_id": "../../etc", "email": "a@b.co"}).status_code == 400
     assert client.post("/api/send-email", data={"job_id": body["job_id"], "email": "a@b.co"}).status_code == 404
+
+
+def test_grounding_check_rejects_even_when_critic_passes(no_llm, monkeypatch):
+    drafts = iter([
+        {"headline": "H", "subheadline": "S", "paragraphs": ["Control it from the SmartThings app."], "cta": "C"},
+        {"headline": "H", "subheadline": "S", "paragraphs": ["Triple Cooling System keeps food fresh."], "cta": "C"},
+    ])
+    feedback_seen = []
+
+    def writer(segment, sections, candidate, job_id, feedback=""):
+        feedback_seen.append(feedback)
+        return next(drafts)
+
+    monkeypatch.setattr(brochure, "generate_copy", writer)
+    monkeypatch.setattr(brochure, "audit_copy", lambda *a, **k: {"passed": True, "feedback": "ok"})
+    monkeypatch.setattr(brochure, "rank_products", lambda customer, seg, tier, cands, job_id: brochure.score_products(customer, cands[:1], job_id))
+
+    ctx = run()
+    assert "SmartThings" in feedback_seen[1]
+    assert ctx.copy["paragraphs"] == ["Triple Cooling System keeps food fresh."]
+    assert ctx.review["ungrounded_terms"] == []

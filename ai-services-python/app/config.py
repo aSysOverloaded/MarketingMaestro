@@ -35,6 +35,9 @@ class Settings(BaseSettings):
     llm_api_url: str = "https://openrouter.ai/api/v1"
     llm_api_key: str = ""
     llm_model: str = "nvidia/nemotron-3-super-120b-a12b:free"
+    # Optional stronger model for the spec critic only (same endpoint/key). Fact-checking is
+    # where a weak model hurts most, and it is one call per draft. Empty = use LLM_MODEL.
+    llm_critic_model: str = ""
 
     # Chat-model call limits. Kept tight on purpose: every step has its own fallback, so a
     # hung provider should fail over quickly rather than hold the request for minutes.
@@ -88,5 +91,7 @@ def log_startup_config() -> None:
         logger.warning("[config] LLM_API_KEY is NOT set - every chat step will run on its deterministic fallback")
     logger.info(f"[config] LLM_API_URL={settings.llm_api_url}")
     logger.info(f"[config] LLM_MODEL={settings.llm_model}")
+    if settings.llm_critic_model:
+        logger.info(f"[config] LLM_CRITIC_MODEL={settings.llm_critic_model}")
     logger.info(f"[config] SMTP {'configured for ' + settings.smtp_host if settings.has_smtp else 'NOT configured - emails are logged locally'}")
     logger.info(f"[config] PDF rendering {'DISABLED' if settings.disable_pdf else 'enabled'}; storage_dir={settings.storage_dir}")

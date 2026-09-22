@@ -14,6 +14,7 @@ from app import diagnostics
 from app.ai.critic import audit_copy
 from app.ai.evaluator import evaluate_copy
 from app.ai.extractor import extract_products
+from app.ai.grounding import find_ungrounded_terms
 from app.ai.planner import generate_plan
 from app.ai.profile import classify_profile, rule_based_profile
 from app.ai.ranker import rank_products, score_products
@@ -158,8 +159,18 @@ def plan_step(ctx: JobContext) -> None:
 
 
 def _review(ctx: JobContext, draft: dict, product: dict, warned: set) -> List[str]:
-    """Run critic + evaluator on a draft; return the list of issues (empty = approved)."""
+    """Run the grounding check, critic and evaluator on a draft; return the list of issues
+    (empty = approved)."""
     issues: List[str] = []
+
+    # Deterministic, so it still runs when the LLM critic is down.
+    ungrounded = find_ungrounded_terms(draft, product)
+    ctx.review["ungrounded_terms"] = ungrounded
+    if ungrounded:
+        issues.append(
+            f"Not in the product specs, remove: {', '.join(ungrounded)}. "
+            "Only mention features, apps, services and numbers that the specs list."
+        )
 
     try:
         critic = audit_copy(draft, product, job_id=ctx.job_id)
@@ -168,7 +179,7 @@ def _review(ctx: JobContext, draft: dict, product: dict, warned: set) -> List[st
             issues.append(f"Spec accuracy: {critic['feedback']}")
     except Exception as e:
         if "critic" not in warned:
-            ctx.warn("copy", f"Spec critic unavailable ({e}); copy was NOT fact-checked against product specs.")
+            ctx.warn("copy", f"Spec critic unavailable ({e}); only the deterministic spec-term check ran.")
             warned.add("critic")
 
     evaluation = evaluate_copy(draft, job_id=ctx.job_id)

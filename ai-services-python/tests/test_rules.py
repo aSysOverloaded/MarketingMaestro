@@ -60,3 +60,55 @@ def test_rank_products_raises_when_nothing_valid(monkeypatch):
     monkeypatch.setattr(ranker, "invoke_structured", lambda *a, **k: output)
     with pytest.raises(RuntimeError):
         ranker.rank_products(CUSTOMER, "Adventure", "Premium", DEFAULT_CATALOG, "j")
+
+
+FRIDGE = DEFAULT_CATALOG[0].model_dump(exclude={"hero_image", "page_number"})
+
+
+def test_grounding_flags_the_invented_app_from_the_live_run():
+    from app.ai.grounding import find_ungrounded_terms
+
+    # Taken from a real draft the LLM critic approved: every spec is correct except the app.
+    draft = {
+        "headline": "Adventure-Ready Refrigeration for Your Basecamp",
+        "subheadline": "Spacious, smart, and built to keep up with your explorations.",
+        "paragraphs": [
+            "Welcome to Your Adventure-Ready Kitchen – This Samsung Family Hub Refrigerator offers a generous 26.5 cu. ft. interior.",
+            "Smart Technology for the Modern Explorer – The Wi-Fi Connected Screen lets you check camera feeds via the SmartThings app.",
+        ],
+        "cta": "Starting at $2,499. Choose from 3 finishes.",
+    }
+    assert find_ungrounded_terms(draft, FRIDGE) == ["SmartThings"]
+
+
+def test_grounding_flags_acronyms_and_unlisted_numbers():
+    from app.ai.grounding import find_ungrounded_terms
+
+    draft = {"paragraphs": ["Holds 30 cu. ft. with NFC pairing, Samsung's best."]}
+    assert find_ungrounded_terms(draft, FRIDGE) == ["NFC", "30"]
+
+
+def test_critic_model_override(monkeypatch):
+    from app.ai.llm import get_chat_model
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "llm_critic_model", "strong/model")
+    assert get_chat_model("critic").model_name == "strong/model"
+    assert get_chat_model("writer").model_name == settings.llm_model
+
+
+def test_grounding_tolerates_spelling_and_unicode_hyphen_variants():
+    from app.ai.grounding import find_ungrounded_terms
+
+    # Both seen in real drafts: "WiFi" for the spec's "Wi-Fi", and U+2011 non-breaking hyphens.
+    draft = {"paragraphs": ["The WiFi Connected Screen and Adventure\u2011Focused design, via the SmartThings app."]}
+    assert find_ungrounded_terms(draft, FRIDGE) == ["SmartThings"]
+
+
+def test_grounding_short_terms_need_a_whole_word_match():
+    from app.ai.grounding import find_ungrounded_terms
+
+    # "ai" appears inside the fridge's "Stainless", but the fridge has no AI feature.
+    assert find_ungrounded_terms({"paragraphs": ["Smart AI cooling."]}, FRIDGE) == ["AI"]
+    washer = DEFAULT_CATALOG[1].model_dump()  # features include "AI DD Smart Fabric Care"
+    assert find_ungrounded_terms({"paragraphs": ["AI DD fabric care."]}, washer) == []
