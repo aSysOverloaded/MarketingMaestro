@@ -29,8 +29,24 @@ latency, i.e. the *number* of LLM calls, not their size.
 ## Phase by phase
 
 ### Ingest (one-off per catalog)
-Page text is embedded into an on-disk Qdrant index (`storage/qdrant`), and the largest 2
-images per page are saved for use as hero images. The catalog is remembered
+Each page is split into **product-sized blocks** rather than indexed whole
+([`app/rag/layout.py`](../ai-services-python/app/rag/layout.py)): words are read with their
+coordinates, split at vertical gutters (the whitespace columns running down a page), then at
+vertical gaps within each column. Sideways text (rotated nav tabs) is dropped, and lines
+repeated across ≥40% of pages (nav bars, running headers) are stripped before embedding.
+
+Each block is embedded separately, and the largest image **inside that block** is cropped out
+of the rendered page and stored as that product's photo. Cropping the render, rather than
+pulling the embedded image stream, both sidesteps encodings a browser cannot display and
+guarantees the picture belongs to the product beside it.
+
+Why: measured on a real 133-page catalogue, 71% of pages hold several products, and pages
+carry ~19 images each. One chunk per page meant four products shared one index entry and one
+hero image, while stream-order text merged adjacent columns
+(`SOFTLOCK + MESH: 100% POLYESTERAvailable until 202880000274`). That catalogue yields 644
+blocks from 122 pages (median 6 per page), and 207 blocks get their own product photo.
+
+Pages pdfplumber cannot read fall back to one chunk per page, the previous behaviour. The catalog is remembered
 (`storage/catalog.json`) and reused by later runs, including after a restart, until you upload
 another or call `DELETE /api/rag/catalog`.
 
@@ -57,6 +73,10 @@ family size ≥ 3 → Family, and so on.
    forbids inventing: unstated price → `0` (rendered "Price on request"), unstated specs
    omitted, pages without products skipped. This is the largest prompt (~1k tokens), but it
    scales with the 6 matched pages, not with catalog size.
+   Results are **cached per chunk** against the catalog's content hash
+   ([`app/rag/extraction_cache.py`](../ai-services-python/app/rag/extraction_cache.py)), so
+   chunks that matched a previous run cost nothing. `copy_review.extraction_cache` reports
+   hits and misses; forgetting the catalog drops its cache.
 3. **Rank** (LLM) – scores candidates against the profile and returns reasons. Invented or
    duplicate product ids are dropped. Every reason and explanation is then fact-checked
    (below); unsupported ones are removed, since they are printed in the brochure.

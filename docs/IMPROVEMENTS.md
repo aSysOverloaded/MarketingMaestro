@@ -8,6 +8,46 @@ Open items that have been identified but not yet done live in [Backlog](#backlog
 
 ---
 
+## 2026-09-23 — Layout-aware chunking, per-product images, extraction caching
+
+The three items the real catalogue diagnosis called for.
+
+### 1. Pages are split into product-sized blocks
+New `app/rag/layout.py`: words with coordinates (pdfplumber), split at vertical gutters, then
+at vertical gaps within each column; rotated nav text dropped; stray short lines merged into
+the block above. Pure geometry, so it is unit-tested with plain word dicts.
+
+On the real catalogue's page 54 this separates the four products (GOLEM `80000000`, WISP
+`80000274`, WYVERN ECO `80000009`, BISMUTH) that were previously one blob - and surfaced
+prices (`UVP € 33,99`) that stream-order text had buried. Whole catalogue: **644 blocks from
+122 pages** (median 6 per page) in 104 s, versus 133 page-sized chunks before.
+
+### 2. Each product gets its own photo
+The largest image sitting **inside a block** is cropped out of the rendered page (110 dpi) and
+stored as that block's image, instead of "the biggest image anywhere on the page" shared by
+every product on it. Cropping the render also sidesteps image encodings a browser could not
+display. 207 of the 644 blocks got a photo; pages pdfplumber cannot read fall back to the old
+page-level behaviour.
+
+### 3. Extraction is cached per chunk
+`app/rag/extraction_cache.py` stores extracted products against the catalog's content hash, so
+chunks that matched a previous run skip the largest prompt in the pipeline. `copy_review`
+reports `extraction_cache: {hits, misses}`, and forgetting a catalog drops its cache. A
+re-uploaded (changed) catalog has a different hash, so stale entries are never read.
+
+- **Files:** `app/rag/layout.py` (new), `app/rag/extraction_cache.py` (new),
+  `app/rag/search.py`, `app/pipeline/brochure.py`, `requirements.txt` (pdfplumber),
+  `tests/test_layout.py` (new), `tests/test_extraction_cache.py` (new)
+- **Verified:** 61 tests. Layout: column splitting, one product staying one block while a
+  distant product does not, rotated text dropped, stray lines merged, image-to-block
+  assignment. Cache: round trip, per-catalog keying, corrupt file ignored, a second run
+  reusing products without calling the extractor, and each product taking the image from its
+  own block. Chunking was also dry-run over the real 133-page catalogue (no quota spent).
+- **Not yet verified live:** a full ingest of that catalogue means 644 embedding requests
+  (~7 min at the free tier's 100/minute).
+
+---
+
 ## 2026-09-23 — Ingest quality, diagnosed on a real 133-page catalogue
 
 New `scripts/inspect_catalog.py` reports what a PDF will actually give the pipeline (text per
@@ -529,16 +569,9 @@ Identified but not yet done. Ordered roughly by priority.
 > named extracted images, publicly served `/storage`) is acceptable under this assumption, so
 > multi-user items are out of scope rather than backlog.
 
-- **PDF extraction: one page = one chunk.** Measured on a real catalogue, 71% of pages hold
-  several products, so they share one index entry and one hero image, and the extractor gets a
-  blob. Split pages into product blocks (a product code like `80000274` plus a name line is a
-  reliable boundary in that catalogue) and embed per block.
-- **PDF extraction: columns are flattened.** `pypdf` gives text in stream order, so adjacent
-  columns merge (`POLYESTERAvailable until 202880000274`). pdfplumber/PyMuPDF expose word
-  coordinates; clustering by x-position would keep product blocks apart and also let images be
-  matched to the product beside them.
-- **Extraction repeats every run** for the same matched pages; caching extracted products per
-  page (in the Qdrant payload) makes repeat runs skip it.
+- **Ingest is slower and costs more embedding requests now**: one request per block (644 for a
+  133-page catalogue) instead of per page, plus ~0.8 s/page for layout parsing and rendering.
+  One-off per catalog, but worth revisiting if quota is tight (e.g. skip colour-swatch blocks).
 - **Retrieval is vector-only.** No keyword/BM25 hybrid, so exact model codes match poorly.
 - **OCR** is still absent, but measured as *not* the bottleneck for this catalogue (0 empty
   pages). Needed only for scanned catalogues.

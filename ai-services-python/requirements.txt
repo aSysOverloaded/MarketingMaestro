@@ -9,6 +9,8 @@ pydantic-settings==2.3.4
 python-multipart==0.0.9
 qdrant-client==1.9.1
 pypdf==4.2.0
+# Layout-aware extraction: word coordinates and page rendering (app/rag/layout.py)
+pdfplumber==0.11.10
 Pillow>=8.0.0
 Jinja2==3.1.6
 # PDF rendering. Uses an installed Chrome/Edge if present, else run: python -m playwright install chromium

@@ -6,6 +6,7 @@ Go version this replaces fell back silently at almost every step (canned profile
 catalog, auto-passed critic, mock PDF) while still reporting success.
 """
 import logging
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -27,7 +28,8 @@ from app.catalog import DEFAULT_CATALOG, CustomerInput, Product, Recommendation,
 from app.config import settings
 from app.observability import log_stage
 from app.pipeline.workflow import Step, Workflow
-from app.rag.search import search_catalog
+from app.rag import extraction_cache
+from app.rag.search import get_catalog, search_catalog
 from app.render.brochure import compile_html
 from app.render.pdf import render_pdf
 
@@ -114,20 +116,73 @@ def profile_step(ctx: JobContext) -> None:
         ctx.warn("profile", f"AI profiling unavailable ({e}); used rule-based segment '{ctx.profile.segment}'.")
 
 
+def _match_product_to_chunk(product: Product, chunks: List[dict]) -> Optional[dict]:
+    """Which retrieved chunk a product came from: the one naming it, else one from its page.
+
+    Used to give the product the image cropped from its own block, rather than any image on
+    the page - a catalogue page often holds four products.
+    """
+    name = re.sub(r"[^a-z0-9]", "", (product.model or "").lower())
+    if name:
+        for chunk in chunks:
+            if name in re.sub(r"[^a-z0-9]", "", chunk["content"].lower()):
+                return chunk
+    return next((c for c in chunks if c["page_number"] == product.page_number), None)
+
+
+def _extract_with_cache(ctx: JobContext, matches: List[dict]) -> List[Product]:
+    """Extract products from the matched chunks, reusing anything extracted before.
+
+    The same popular chunks match run after run, and extraction is the largest prompt in the
+    pipeline, so results are cached per chunk against the catalog's content hash.
+    """
+    catalog = get_catalog() or {}
+    catalog_sha = catalog.get("sha256", "")
+    cached = extraction_cache.get_many(catalog_sha, [m["chunk_id"] for m in matches]) if catalog_sha else {}
+
+    products: List[Product] = []
+    for chunk_id, raw_products in cached.items():
+        products.extend(Product(**raw) for raw in raw_products)
+
+    fresh_chunks = [m for m in matches if m["chunk_id"] not in cached]
+    ctx.review["extraction_cache"] = {"hits": len(cached), "misses": len(fresh_chunks)}
+    if cached:
+        log_stage(logger, ctx.job_id, "recommend", f"extraction cache: {len(cached)} hit(s), {len(fresh_chunks)} miss(es)")
+    if not fresh_chunks:
+        return products
+
+    ctx.note(f"Extracting products from {len(fresh_chunks)} new catalog section(s)")
+    chunks_text = "".join(f"--- PAGE {c['page_number']} SECTION {c['block_index']} ---\n{c['content']}\n" for c in fresh_chunks)
+    extracted = extract_products(chunks_text, ctx.job_id)
+    _note_fallback(ctx, "extractor", "recommend")
+
+    # Attribute each product to the chunk it came from, for its image and for the cache.
+    by_chunk: Dict[str, list] = {c["chunk_id"]: [] for c in fresh_chunks}
+    for product in extracted:
+        chunk = _match_product_to_chunk(product, fresh_chunks)
+        if chunk:
+            by_chunk[chunk["chunk_id"]].append(product.model_dump())
+    if catalog_sha:
+        extraction_cache.put_many(catalog_sha, by_chunk)
+
+    products.extend(extracted)
+    return products
+
+
 def _retrieve_candidates(ctx: JobContext) -> List[Product]:
     """One retrieval query per hobby (catalog text describes products, not demographics),
-    merged by page, then one LLM extraction over the merged pages."""
+    merged by chunk, then one LLM extraction over the chunks not already cached."""
     hobbies = [h for h in ctx.customer.hobbies if h.strip()] or ["general everyday use"]
     queries = [f"Gear and equipment for {h.strip()}." for h in hobbies]
     ctx.rag_debug = {"active": True, "query": " | ".join(queries), "match_count": 0, "matches": []}
 
     ctx.note(f"Searching the catalog ({len(queries)} {'query' if len(queries) == 1 else 'queries'})")
-    merged: Dict[int, dict] = {}
+    merged: Dict[str, dict] = {}
     for query in queries:
         for m in search_catalog(query, PER_HOBBY_LIMIT, job_id=ctx.job_id):
-            page = m["page_number"]
-            if page not in merged or m["score"] > merged[page]["score"]:
-                merged[page] = m
+            chunk_id = m["chunk_id"]
+            if chunk_id not in merged or m["score"] > merged[chunk_id]["score"]:
+                merged[chunk_id] = m
 
     if diagnostics.get_status("embeddings")["mode"] == "mock":
         ctx.warn("recommend", "Embeddings unavailable (mock vectors) - catalog retrieval ranking is meaningless for this run.")
@@ -135,23 +190,20 @@ def _retrieve_candidates(ctx: JobContext) -> List[Product]:
     matches = sorted(merged.values(), key=lambda m: m["score"], reverse=True)[:MAX_COMBINED_MATCHES]
     ctx.rag_debug["match_count"] = len(matches)
     ctx.rag_debug["matches"] = [
-        {"page_number": m["page_number"], "score": m["score"], "image_count": len(m["images"]), "content_length": len(m["content"])}
+        {"page_number": m["page_number"], "block_index": m.get("block_index", 0), "score": m["score"],
+         "image_count": len(m["images"]), "content_length": len(m["content"])}
         for m in matches
     ]
     if not matches:
         raise RuntimeError(f"retrieval returned 0 matches across {len(queries)} hobby queries")
 
-    ctx.note(f"Extracting products from {len(matches)} matched page(s)")
-    pages_text = "".join(f"--- PAGE {m['page_number']} ---\n{m['content']}\n" for m in matches)
-    products = extract_products(pages_text, ctx.job_id)
-    _note_fallback(ctx, "extractor", "recommend")
-    images_by_page = {m["page_number"]: m["images"] for m in matches}
-    for p in products:
-        images = images_by_page.get(p.page_number) or []
-        if images:
-            p.hero_image = images[0]  # largest image on the page (sorted at ingest)
+    products = _extract_with_cache(ctx, matches)
+    for product in products:
+        chunk = _match_product_to_chunk(product, matches)
+        if chunk and chunk["images"]:
+            product.hero_image = chunk["images"][0]  # cropped from this product's own block
     if not products:
-        raise RuntimeError("no products described on the matched catalog pages")
+        raise RuntimeError("no products described on the matched catalog sections")
     return products
 
 

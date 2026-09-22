@@ -9,6 +9,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Optional
 
+import pdfplumber
 import pypdf
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
@@ -16,6 +17,8 @@ import google.generativeai as genai
 
 from app import diagnostics
 from app.config import settings
+from app.rag import extraction_cache
+from app.rag.layout import segment_words
 from app.observability import log_stage
 
 logger = logging.getLogger("rag")
@@ -54,6 +57,11 @@ MAX_EMBED_CHARS = 8000
 # Extracted page images are only ever used to pick one hero image per page, so keeping every
 # image of a large catalog just fills the disk.
 MAX_IMAGES_PER_PAGE = 2
+# Blocks shorter than this are page furniture, stray codes or captions: not worth an index
+# entry (and every entry costs an embedding request).
+MIN_CHUNK_CHARS = 80
+# Resolution for cropping a product photo out of the rendered page.
+IMAGE_RENDER_DPI = 110
 MIN_IMAGE_BYTES = 4096  # skip icons, logos, separators
 # Free-tier embedding quota is per minute and counts one request per text, so a large catalog
 # WILL hit it mid-ingest. Waiting and retrying is the difference between a fully indexed
@@ -83,9 +91,12 @@ def get_catalog() -> Optional[dict]:
 
 
 def clear_catalog() -> None:
+    current = get_catalog()
     if _collection_exists():
         get_client().delete_collection(COLLECTION_NAME)
     _catalog_meta_path().unlink(missing_ok=True)
+    if current:
+        extraction_cache.clear(current["sha256"])
 
 
 def initialize_collection():
@@ -232,6 +243,96 @@ def select_page_images(page, page_number: int, dest_dir: str) -> list:
     return paths
 
 
+def _crop_block_image(plumber_page, block, page_number: int, block_index: int, dest_dir: str, rendered) -> Optional[str]:
+    """Save the largest image sitting inside this block, cropped out of the rendered page.
+
+    Cropping the rendered page (rather than pulling the embedded image stream) sidesteps
+    exotic encodings a browser could not display anyway, and guarantees the picture belongs to
+    this product: it is taken from where the product actually sits on the page.
+    """
+    inside = [im for im in plumber_page.images
+              if block.contains((im["x0"] + im["x1"]) / 2, (im["top"] + im["bottom"]) / 2, margin=30)]
+    if not inside:
+        return None
+    image = max(inside, key=lambda im: (im["x1"] - im["x0"]) * (im["bottom"] - im["top"]))
+    if (image["x1"] - image["x0"]) * (image["bottom"] - image["top"]) < 2500:  # thumbnail-sized: not a product shot
+        return None
+
+    scale = IMAGE_RENDER_DPI / 72
+    box = (max(image["x0"] * scale, 0), max(image["top"] * scale, 0),
+           min(image["x1"] * scale, rendered.width), min(image["bottom"] * scale, rendered.height))
+    if box[2] - box[0] < 20 or box[3] - box[1] < 20:
+        return None
+    name = f"page_{page_number}_block_{block_index}.png"
+    rendered.crop(box).save(os.path.join(dest_dir, name))
+    return f"/storage/extracted_images/{name}"
+
+
+def chunk_pdf_by_layout(pdf_bytes: bytes, dest_dir: str, job_id: str) -> tuple:
+    """Split every page into product-sized blocks with their own images (see app/rag/layout.py).
+
+    Returns (chunks, stats). Falls back to one chunk per page - the previous behaviour - for
+    any page pdfplumber cannot read.
+    """
+    chunks, stats = [], {"pages_with_text": 0, "image_failures": 0, "pages_fallback": 0}
+    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+        for page_index, plumber_page in enumerate(pdf.pages):
+            page_number = page_index + 1
+            try:
+                blocks = segment_words(plumber_page.extract_words())
+            except Exception as e:
+                log_stage(logger, job_id, "ingest", f"layout parsing failed on page {page_number}: {e}", level="warning")
+                blocks = []
+                stats["pages_fallback"] += 1
+
+            kept = [b for b in blocks if len(b.text) >= MIN_CHUNK_CHARS]
+            if not kept:
+                continue
+            stats["pages_with_text"] += 1
+
+            rendered = None
+            for block_index, block in enumerate(kept):
+                image_path = None
+                try:
+                    if plumber_page.images:
+                        if rendered is None:
+                            rendered = plumber_page.to_image(resolution=IMAGE_RENDER_DPI).original
+                        image_path = _crop_block_image(plumber_page, block, page_number, block_index, dest_dir, rendered)
+                except Exception as e:
+                    stats["image_failures"] += 1
+                    log_stage(logger, job_id, "ingest", f"image crop failed on page {page_number}: {e}", level="warning")
+
+                chunks.append({
+                    "chunk_id": f"p{page_number}b{block_index}",
+                    "page_number": page_number,
+                    "block_index": block_index,
+                    "content": block.text,
+                    "images": [image_path] if image_path else [],
+                })
+            plumber_page.close()  # pdfplumber caches per-page objects; large catalogs need this
+    return chunks, stats
+
+
+def chunk_pdf_by_page(pdf_bytes: bytes, dest_dir: str, job_id: str) -> tuple:
+    """Fallback chunking: one chunk per page, images picked by size (pypdf)."""
+    reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
+    chunks, stats = [], {"pages_with_text": 0, "image_failures": 0, "pages_fallback": len(reader.pages)}
+    for i, page in enumerate(reader.pages):
+        text = (page.extract_text() or "").strip()
+        if not text:
+            continue
+        stats["pages_with_text"] += 1
+        try:
+            images = select_page_images(page, i + 1, dest_dir)
+        except Exception as e:
+            images = []
+            stats["image_failures"] += 1
+            log_stage(logger, job_id, "ingest", f"failed to extract images on page {i+1}: {e}", level="warning")
+        chunks.append({"chunk_id": f"p{i + 1}b0", "page_number": i + 1, "block_index": 0,
+                       "content": text, "images": images})
+    return chunks, stats
+
+
 def ingest_pdf(pdf_bytes: bytes, job_id: str = "unknown", filename: str = "catalog.pdf") -> dict:
     content_hash = hashlib.sha256(pdf_bytes).hexdigest()
 
@@ -240,7 +341,9 @@ def ingest_pdf(pdf_bytes: bytes, job_id: str = "unknown", filename: str = "catal
     current = get_catalog()
     if current and current["sha256"] == content_hash and current.get("embeddings") == "real":
         log_stage(logger, job_id, "ingest", f"content hash matches currently indexed catalog ({content_hash[:12]}...), skipping re-embed")
-        return {"success": True, "indexed_pages": current["indexed_pages"], "collection_name": COLLECTION_NAME, "reused": True}
+        return {"success": True, "indexed_pages": current["indexed_pages"],
+                "indexed_chunks": current.get("indexed_chunks", current["indexed_pages"]),
+                "collection_name": COLLECTION_NAME, "reused": True}
 
     start = time.monotonic()
     log_stage(logger, job_id, "ingest", f"starting ingest of {len(pdf_bytes)} bytes")
@@ -252,70 +355,35 @@ def ingest_pdf(pdf_bytes: bytes, job_id: str = "unknown", filename: str = "catal
     backend_storage = str(settings.storage_dir / "extracted_images")
     os.makedirs(backend_storage, exist_ok=True)
 
-    # 2. Parse PDF content
-    pdf_file = io.BytesIO(pdf_bytes)
-    reader = pypdf.PdfReader(pdf_file)
-    
-    indexed_count = 0
-    skipped_empty_pages = 0
-    image_extract_failures = 0
-    points = []
+    # 2. Split the PDF into product-sized chunks (layout-aware, one per product block)
+    total_pages = len(pypdf.PdfReader(io.BytesIO(pdf_bytes)).pages)
+    try:
+        chunks, stats = chunk_pdf_by_layout(pdf_bytes, backend_storage, job_id)
+    except Exception as e:
+        log_stage(logger, job_id, "ingest", f"layout chunking failed ({e}); falling back to one chunk per page", level="warning")
+        chunks, stats = chunk_pdf_by_page(pdf_bytes, backend_storage, job_id)
+    if not chunks:
+        chunks, stats = chunk_pdf_by_page(pdf_bytes, backend_storage, job_id)
 
-    # Store page texts and details for batch processing
-    pages_to_embed = []
-    page_details = []
-
-    for i, page in enumerate(reader.pages):
-        text = page.extract_text() or ""
-        text = text.strip()
-        if not text:
-            skipped_empty_pages += 1
-            continue
-
-        # Extract images from this page. Sorted largest-pixel-area-first (not extraction
-        # order) so that images[0] - which the recommend step takes unconditionally as the
-        # brochure's hero image - is the most likely candidate to be the actual product
-        # photo rather than a small decorative/lifestyle banner image that happens to be
-        # placed first in the PDF's internal image order.
-        try:
-            image_paths = select_page_images(page, i + 1, backend_storage)
-        except Exception as e:
-            image_paths = []
-            image_extract_failures += 1
-            log_stage(logger, job_id, "ingest", f"failed to extract images on page {i+1}: {e}", level="warning")
-
-        pages_to_embed.append(text)
-        page_details.append({
-            "page_number": i + 1,
-            "content": text,
-            "images": image_paths
-        })
-
-    # Drop repeated navigation/header lines before embedding, and keep the cleaned text as the
-    # page content the extractor later reads.
-    boilerplate = find_boilerplate_lines(pages_to_embed)
+    # Drop repeated navigation/header lines before embedding; the cleaned text is also what
+    # the extractor later reads.
+    texts = [c["content"] for c in chunks]
+    boilerplate = find_boilerplate_lines(texts)
     if boilerplate:
         log_stage(logger, job_id, "ingest", f"stripping {len(boilerplate)} repeated line(s) of page furniture")
-        cleaned = [strip_boilerplate(t, boilerplate) for t in pages_to_embed]
-        for details, text in zip(page_details, cleaned):
-            details["content"] = text
-        pages_to_embed = cleaned
+        for chunk in chunks:
+            chunk["content"] = strip_boilerplate(chunk["content"], boilerplate)
+        chunks = [c for c in chunks if len(c["content"]) >= MIN_CHUNK_CHARS]
 
-    # 3. Create vector embeddings, in batches
-    if pages_to_embed:
-        vectors = embed_texts(pages_to_embed, is_query=False)
+    # 3. Embed every chunk (in batches), then index it
+    points = []
+    if chunks:
+        log_stage(logger, job_id, "ingest", f"embedding {len(chunks)} chunk(s) from {stats['pages_with_text']} page(s)")
+        vectors = embed_texts([c["content"] for c in chunks], is_query=False)
+        points = [PointStruct(id=str(uuid.uuid4()), vector=vector, payload=chunk)
+                  for chunk, vector in zip(chunks, vectors)]
 
-        # 4. Create Qdrant indexing points
-        for idx, details in enumerate(page_details):
-            point_id = str(uuid.uuid4())
-            points.append(PointStruct(
-                id=point_id,
-                vector=vectors[idx],
-                payload=details
-            ))
-            indexed_count += 1
-
-    # 5. Insert points into Qdrant index
+    # 4. Insert points into Qdrant index
     if points:
         get_client().upsert(
             collection_name=COLLECTION_NAME,
@@ -323,25 +391,28 @@ def ingest_pdf(pdf_bytes: bytes, job_id: str = "unknown", filename: str = "catal
             points=points
         )
 
+    indexed_count = stats["pages_with_text"]
     duration_ms = int((time.monotonic() - start) * 1000)
     diagnostics.set_ingest_meta({
         "job_id": job_id,
         "indexed_pages": indexed_count,
-        "skipped_empty_pages": skipped_empty_pages,
-        "image_extract_failures": image_extract_failures,
-        "total_pages": len(reader.pages),
+        "indexed_chunks": len(chunks),
+        "skipped_empty_pages": total_pages - indexed_count,
+        "image_extract_failures": stats["image_failures"],
+        "total_pages": total_pages,
         "duration_ms": duration_ms,
     })
     log_stage(
         logger, job_id, "ingest",
-        f"done: indexed={indexed_count} skipped_empty={skipped_empty_pages} "
-        f"image_failures={image_extract_failures} total_pages={len(reader.pages)} duration_ms={duration_ms}"
+        f"done: pages={indexed_count}/{total_pages} chunks={len(chunks)} "
+        f"image_failures={stats['image_failures']} duration_ms={duration_ms}"
     )
 
     _catalog_meta_path().write_text(json.dumps({
         "filename": filename,
         "sha256": content_hash,
         "indexed_pages": indexed_count,
+        "indexed_chunks": len(chunks),
         "indexed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "embeddings": diagnostics.get_status("embeddings")["mode"],
     }), encoding="utf-8")
@@ -349,6 +420,7 @@ def ingest_pdf(pdf_bytes: bytes, job_id: str = "unknown", filename: str = "catal
     return {
         "success": True,
         "indexed_pages": indexed_count,
+        "indexed_chunks": len(chunks),
         "collection_name": COLLECTION_NAME,
         "reused": False,
     }
@@ -412,7 +484,9 @@ def search_catalog(query: str, limit: int = 3, job_id: str = "unknown") -> list:
     matches = []
     for hit in search_results:
         matches.append({
+            "chunk_id": hit.payload.get("chunk_id", f"p{hit.payload.get('page_number')}b0"),
             "page_number": hit.payload.get("page_number"),
+            "block_index": hit.payload.get("block_index", 0),
             "content": hit.payload.get("content"),
             "images": hit.payload.get("images", []),
             "score": hit.score
