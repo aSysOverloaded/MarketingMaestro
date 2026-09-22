@@ -25,11 +25,11 @@ Tests (offline, no API keys needed): `venv/Scripts/python -m pytest`
 
 `POST /api/recommend` (form fields + optional catalog PDF):
 
-1. **Ingest** the PDF: page text is embedded (Gemini) into an in-memory Qdrant index; page images are saved.
+1. **Ingest** the PDF: page text is embedded (Gemini) into an on-disk Qdrant index (`storage/qdrant`); page images are saved. Without a PDF, the previously indexed catalog is reused (it survives restarts); `DELETE /api/rag/catalog` forgets it. The app is single-user by design: one catalog at a time.
 2. **profile** – LLM assigns a segment and budget tier (rule-based fallback).
-3. **recommend** – one retrieval query per hobby, LLM extracts products from the matched pages, LLM ranks them (rule-based scoring fallback).
+3. **recommend** – one retrieval query per hobby, LLM extracts products from the matched pages, LLM ranks them (rule-based scoring fallback). Ranking reasons citing terms absent from the specs and customer profile are removed.
 4. **plan** – LLM outlines the brochure sections.
-5. **copy** – LLM writes the copy; the spec critic and evaluator review it; rejected drafts are revised with the reviewer's feedback (up to 2 revisions), else claim-free generic copy is used.
+5. **copy** – LLM writes the copy; a deterministic spec-term check, the spec critic and the evaluator review it; rejected drafts are revised with the reviewer's feedback (up to 2 revisions), else claim-free generic copy is used.
 6. **html** – Jinja2 template → `storage/temp_brochures/`.
 7. **pdf** – headless Chromium via Playwright → `storage/generated_brochures/`.
 

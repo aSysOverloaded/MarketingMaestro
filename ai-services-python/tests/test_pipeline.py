@@ -19,6 +19,7 @@ def test_offline_run_completes_and_reports_every_fallback(no_llm):
     assert ctx.profile.segment == "Adventure"  # rule-based, from the "camping" hobby
     assert ctx.copy == brochure.fallback_copy("Adventure")
     assert ctx.html_path.is_file() and ctx.pdf_path is None
+    assert ctx.review["ranker_removed"] == []  # the rule-based fallback's own reasons are grounded
 
 
 def _stub_reviewed_copy(monkeypatch, critic_results):
@@ -107,3 +108,21 @@ def test_grounding_check_rejects_even_when_critic_passes(no_llm, monkeypatch):
     assert "SmartThings" in feedback_seen[1]
     assert ctx.copy["paragraphs"] == ["Triple Cooling System keeps food fresh."]
     assert ctx.review["ungrounded_terms"] == []
+
+
+def test_ranker_reasons_with_unsupported_terms_are_removed(no_llm, monkeypatch):
+    def ranked(customer, segment, tier, candidates, job_id):
+        fridge = candidates[0]
+        return [Recommendation(
+            recommendation_id="r1", product_id=fridge.id, score=90,
+            matched_rules=["Fits your family of 3", "Works with the SmartThings app", "Within your $90,000 budget"],
+            explanation="Match score 92: its NFC pairing suits you.",
+        )]
+
+    monkeypatch.setattr(brochure, "rank_products", ranked)
+    ctx = run()
+    rec = ctx.recommendations[0]
+    assert rec.matched_rules == ["Fits your family of 3", "Within your $90,000 budget"]  # customer facts are fine
+    assert rec.explanation == brochure.SAFE_EXPLANATION
+    assert {t for r in ctx.review["ranker_removed"] for t in r["terms"]} == {"SmartThings", "92", "NFC"}
+    assert any("ranking reason" in w["message"] for w in ctx.warnings)

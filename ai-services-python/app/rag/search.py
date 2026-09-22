@@ -1,9 +1,13 @@
 import os
 import io
+import json
 import time
 import uuid
 import hashlib
 import logging
+from datetime import datetime, timezone
+from typing import Optional
+
 import pypdf
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
@@ -15,24 +19,55 @@ from app.observability import log_stage
 
 logger = logging.getLogger("rag")
 
-# Initialize the Qdrant client in memory (100% free, local)
-client = QdrantClient(":memory:")
 COLLECTION_NAME = "catalog_products"
 
-# Content hash of the PDF currently held in the in-memory collection, and the ingest
-# result that produced it. A re-upload of byte-identical content (e.g. clicking
-# Analyze again after a downstream step like CriticStep rejects the copy) skips
-# re-embedding entirely instead of burning Gemini embedding quota for no reason -
-# the catalog itself didn't change, only something later in the pipeline failed.
-# Reset to None whenever the process restarts, since the in-memory index is too.
-_last_ingested_hash = None
-_last_ingest_result = None
+# Local on-disk Qdrant (storage/qdrant) so the indexed catalog survives restarts. Created
+# lazily: `python -m app.main` runs uvicorn with reload, which imports this module in both the
+# reloader and the worker process, and local Qdrant allows only one process per folder.
+_client: Optional[QdrantClient] = None
+
+
+def get_client() -> QdrantClient:
+    global _client
+    if _client is None:
+        path = settings.storage_dir / "qdrant"
+        path.mkdir(parents=True, exist_ok=True)
+        _client = QdrantClient(path=str(path))
+    return _client
+
+
+def _catalog_meta_path():
+    return settings.storage_dir / "catalog.json"
+
+
 VECTOR_DIMENSION = 768  # text-embedding-004 was retired; gemini-embedding-001 defaults to 3072
                         # dims but supports output_dimensionality to request this size instead
 EMBEDDING_MODEL = "models/gemini-embedding-001"
 
+def _collection_exists() -> bool:
+    return any(c.name == COLLECTION_NAME for c in get_client().get_collections().collections)
+
+
+def get_catalog() -> Optional[dict]:
+    """The currently indexed catalog ({filename, sha256, indexed_pages, indexed_at,
+    embeddings}), or None if nothing usable is indexed. Only a single catalog is kept at a
+    time (the app is single-user by design)."""
+    meta_path = _catalog_meta_path()
+    if not meta_path.is_file() or not _collection_exists():
+        return None
+    if get_client().get_collection(COLLECTION_NAME).points_count == 0:
+        return None
+    return json.loads(meta_path.read_text(encoding="utf-8"))
+
+
+def clear_catalog() -> None:
+    if _collection_exists():
+        get_client().delete_collection(COLLECTION_NAME)
+    _catalog_meta_path().unlink(missing_ok=True)
+
+
 def initialize_collection():
-    client.recreate_collection(
+    get_client().recreate_collection(
         collection_name=COLLECTION_NAME,
         vectors_config=VectorParams(size=VECTOR_DIMENSION, distance=Distance.COSINE),
     )
@@ -86,16 +121,15 @@ def embed_texts(texts: list, is_query: bool = False) -> list:
         diagnostics.set_status("embeddings", "mock", str(e))
         return [[0.1] * VECTOR_DIMENSION] * len(texts)
 
-def ingest_pdf(pdf_bytes: bytes, job_id: str = "unknown") -> dict:
-    global _last_ingested_hash, _last_ingest_result
-
+def ingest_pdf(pdf_bytes: bytes, job_id: str = "unknown", filename: str = "catalog.pdf") -> dict:
     content_hash = hashlib.sha256(pdf_bytes).hexdigest()
-    collections = client.get_collections().collections
-    collection_exists = any(c.name == COLLECTION_NAME for c in collections)
 
-    if collection_exists and content_hash == _last_ingested_hash and _last_ingest_result is not None:
+    # Re-uploading byte-identical content skips re-embedding (saves Gemini quota) - unless the
+    # stored vectors were mock ones from a run without a working key, which are worth replacing.
+    current = get_catalog()
+    if current and current["sha256"] == content_hash and current.get("embeddings") == "real":
         log_stage(logger, job_id, "ingest", f"content hash matches currently indexed catalog ({content_hash[:12]}...), skipping re-embed")
-        return _last_ingest_result
+        return {"success": True, "indexed_pages": current["indexed_pages"], "collection_name": COLLECTION_NAME, "reused": True}
 
     start = time.monotonic()
     log_stage(logger, job_id, "ingest", f"starting ingest of {len(pdf_bytes)} bytes")
@@ -183,7 +217,7 @@ def ingest_pdf(pdf_bytes: bytes, job_id: str = "unknown") -> dict:
 
     # 5. Insert points into Qdrant index
     if points:
-        client.upsert(
+        get_client().upsert(
             collection_name=COLLECTION_NAME,
             wait=True,
             points=points
@@ -204,14 +238,20 @@ def ingest_pdf(pdf_bytes: bytes, job_id: str = "unknown") -> dict:
         f"image_failures={image_extract_failures} total_pages={len(reader.pages)} duration_ms={duration_ms}"
     )
 
-    result = {
+    _catalog_meta_path().write_text(json.dumps({
+        "filename": filename,
+        "sha256": content_hash,
+        "indexed_pages": indexed_count,
+        "indexed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "embeddings": diagnostics.get_status("embeddings")["mode"],
+    }), encoding="utf-8")
+
+    return {
         "success": True,
         "indexed_pages": indexed_count,
-        "collection_name": COLLECTION_NAME
+        "collection_name": COLLECTION_NAME,
+        "reused": False,
     }
-    _last_ingested_hash = content_hash
-    _last_ingest_result = result
-    return result
 
 def get_stats() -> dict:
     # embeddings_mode reflects the outcome of the LAST actual embed_content call, not just
@@ -220,21 +260,21 @@ def get_stats() -> dict:
     embeddings_mode = embed_status["mode"]
     embeddings_detail = embed_status["detail"]
 
-    collections = client.get_collections().collections
-    collection_exists = any(c.name == COLLECTION_NAME for c in collections)
-    if not collection_exists:
+    if not _collection_exists():
         return {
             "collection_exists": False,
             "point_count": 0,
+            "catalog": None,
             "last_ingest": diagnostics.get_ingest_meta(),
             "embeddings_mode": embeddings_mode,
             "embeddings_detail": embeddings_detail,
         }
 
-    info = client.get_collection(COLLECTION_NAME)
+    info = get_client().get_collection(COLLECTION_NAME)
     return {
         "collection_exists": True,
         "point_count": info.points_count,
+        "catalog": get_catalog(),
         "last_ingest": diagnostics.get_ingest_meta(),
         "embeddings_mode": embeddings_mode,
         "embeddings_detail": embeddings_detail,
@@ -243,10 +283,7 @@ def get_stats() -> dict:
 def search_catalog(query: str, limit: int = 3, job_id: str = "unknown") -> list:
     start = time.monotonic()
 
-    # Check if the collection exists
-    collections = client.get_collections().collections
-    collection_exists = any(c.name == COLLECTION_NAME for c in collections)
-    if not collection_exists:
+    if not _collection_exists():
         log_stage(logger, job_id, "search", f"query='{query}' collection does not exist yet, returning 0 matches", level="warning")
         return []
 
@@ -254,7 +291,7 @@ def search_catalog(query: str, limit: int = 3, job_id: str = "unknown") -> list:
     query_vector = embed_text(query, is_query=True)
 
     # 2. Perform Cosine Similarity Search
-    search_results = client.search(
+    search_results = get_client().search(
         collection_name=COLLECTION_NAME,
         query_vector=query_vector,
         limit=limit

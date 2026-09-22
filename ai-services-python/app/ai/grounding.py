@@ -50,12 +50,18 @@ def _is_specific_term(part: str) -> bool:
 
 
 def find_ungrounded_terms(copy: dict, product: dict) -> List[str]:
-    spec = _spec_text(product)
+    """Check writer copy ({headline, subheadline, paragraphs, cta}) against a product's specs."""
+    text = " ".join([copy.get("headline", ""), copy.get("subheadline", ""), *copy.get("paragraphs", []), copy.get("cta", "")])
+    return find_ungrounded_in_text(text, product)
+
+
+def find_ungrounded_in_text(text: str, source: dict) -> List[str]:
+    """Check free text against any JSON-able source of truth (specs, customer profile, ...)."""
+    spec = _spec_text(source)
     spec_squashed = _squash(spec)
     spec_words = {_squash(t) for t in _TOKEN.findall(_DASHES.sub("-", spec))}
     spec_numbers = _spec_numbers(spec)
 
-    text = " ".join([copy.get("headline", ""), copy.get("subheadline", ""), *copy.get("paragraphs", []), copy.get("cta", "")])
     text = _DASHES.sub("-", text)
 
     found: List[str] = []

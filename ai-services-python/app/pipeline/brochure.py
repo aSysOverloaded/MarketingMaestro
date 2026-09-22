@@ -14,7 +14,7 @@ from app import diagnostics
 from app.ai.critic import audit_copy
 from app.ai.evaluator import evaluate_copy
 from app.ai.extractor import extract_products
-from app.ai.grounding import find_ungrounded_terms
+from app.ai.grounding import find_ungrounded_in_text, find_ungrounded_terms
 from app.ai.planner import generate_plan
 from app.ai.profile import classify_profile, rule_based_profile
 from app.ai.ranker import rank_products, score_products
@@ -148,6 +148,45 @@ def recommend_step(ctx: JobContext) -> None:
 
     by_id = {p.id: p for p in candidates}
     ctx.selected_products = [by_id[r.product_id] for r in ctx.recommendations]
+    _ground_recommendations(ctx)
+
+
+# Replaces a ranker explanation that fails the grounding check. Customer-facing.
+SAFE_EXPLANATION = "Selected for how it fits your needs and budget."
+
+
+def _ground_recommendations(ctx: JobContext) -> None:
+    """The per-product explanation and matched rules are printed in the brochure, so check
+    them like the cover copy. There is no revise loop for the ranker: an explanation with
+    unsupported terms is replaced with a safe one, and such matched rules are dropped."""
+    removed = []
+    for rec, product in zip(ctx.recommendations, ctx.selected_products):
+        # Explanations may legitimately cite the customer ("fits your family of 3"), so the
+        # customer profile counts as a source of truth alongside the product specs.
+        source = {
+            "product": product.model_dump(exclude={"hero_image", "page_number"}),
+            "customer": ctx.customer.model_dump(),
+            "segment": ctx.profile.segment,
+            "budget_tier": ctx.profile.budget_tier,
+        }
+        kept = []
+        for rule in rec.matched_rules:
+            terms = find_ungrounded_in_text(rule, source)
+            if terms:
+                removed.append({"product_id": rec.product_id, "text": rule, "terms": terms})
+            else:
+                kept.append(rule)
+        rec.matched_rules = kept
+
+        terms = find_ungrounded_in_text(rec.explanation, source)
+        if terms:
+            removed.append({"product_id": rec.product_id, "text": rec.explanation, "terms": terms})
+            rec.explanation = SAFE_EXPLANATION
+
+    ctx.review["ranker_removed"] = removed
+    if removed:
+        terms = sorted({t for r in removed for t in r["terms"]})
+        ctx.warn("recommend", f"Removed {len(removed)} ranking reason(s) citing things not in the specs or profile: {', '.join(terms)}.")
 
 
 def plan_step(ctx: JobContext) -> None:

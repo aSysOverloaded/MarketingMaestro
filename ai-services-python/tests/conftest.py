@@ -23,10 +23,17 @@ def no_llm(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def isolated_storage(tmp_path, monkeypatch):
-    """Generated files go to a temp dir, never the real storage/; PDFs off by default."""
+    """Generated files and the Qdrant index go to a temp dir, never the real storage/.
+    PDFs off, SMTP off, and no Gemini key, so embeddings are local mock vectors."""
+    import app.rag.search as search
+
     monkeypatch.setattr(settings, "storage_dir", tmp_path / "storage")
     monkeypatch.setattr(settings, "disable_pdf", True)
     monkeypatch.setattr(settings, "smtp_host", "")
     monkeypatch.setattr(settings, "smtp_user", "")
+    monkeypatch.setattr(settings, "gemini_api_key", "")
+    monkeypatch.setattr(search, "_client", None)
     diagnostics._status.clear()
-    return tmp_path / "storage"
+    yield tmp_path / "storage"
+    if search._client is not None:
+        search._client.close()

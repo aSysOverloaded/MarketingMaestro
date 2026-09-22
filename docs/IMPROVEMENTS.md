@@ -8,6 +8,55 @@ Open items that have been identified but not yet done live in [Backlog](#backlog
 
 ---
 
+## 2026-09-22 — Catalog persists and is reused; ranker reasons are fact-checked
+
+### The uploaded catalog was forgotten on the next run
+- **Problem:** The pipeline used the indexed catalog only when that request included the PDF.
+  A second run without re-uploading silently used the demo catalog, even though the index
+  still held yours. The index was also in-memory, so every restart meant uploading and
+  embedding again.
+- **Fix:**
+  - Qdrant now runs in local on-disk mode (`storage/qdrant`). The client is created lazily,
+    because `python -m app.main` runs uvicorn with reload, which imports the module in two
+    processes, and local Qdrant allows one process per folder.
+  - `storage/catalog.json` records the indexed catalog: filename, sha256, pages, time, and
+    whether the embeddings were real.
+  - A run without a file reuses the indexed catalog. The response gains
+    `catalog: {filename, ..., source: "uploaded" | "reused"}`, or `null` for the demo catalog.
+  - Re-uploading byte-identical content skips re-embedding, as before, but now also across
+    restarts. The exception is a catalog indexed with mock embeddings (no working
+    `GEMINI_API_KEY`), which is re-embedded.
+  - New `DELETE /api/rag/catalog` to go back to the demo catalog.
+  - UI: a line under the upload box says which catalog the next run will use, with a
+    "forget it" link. The result card shows which catalog a run used. The status is also
+    flagged when the catalog was indexed with mock embeddings.
+- **Files:** `app/rag/search.py`, `app/main.py`, `static/index.html`, `tests/conftest.py`,
+  `tests/test_catalog.py` (new)
+- **Verified:** 3 new tests using a generated one-page PDF: the catalog survives a simulated
+  restart, mock-embedded catalogs are re-embedded while real ones are reused, and the API goes
+  upload → reused on the next run → forgotten → demo catalog. Started the real server with
+  `python -m app.main` (reload mode): no Qdrant folder-lock conflict, and the stats and
+  forget routes respond. The test fixture now also blanks `GEMINI_API_KEY`, so tests never
+  call the real embeddings API.
+
+### Ranker explanations are fact-checked
+- **Problem:** Only the cover copy went through the grounding check and critic. The
+  per-product "Why this option fits your profile" explanation and matched rules came
+  straight from the ranking LLM and were printed in the brochure.
+- **Fix:** After ranking, each explanation and matched rule is run through the grounding check
+  (`find_ungrounded_in_text`, split out of `find_ungrounded_terms`). The sources are the
+  product's specs **plus the customer profile**, since "fits your family of 3" is a legitimate
+  reason. The ranker has no revise loop, so a flagged rule is dropped and a flagged
+  explanation is replaced with a safe customer-facing sentence. Removals are listed in
+  `copy_review.ranker_removed` and summarized in one warning.
+- **Files:** `app/ai/grounding.py`, `app/pipeline/brochure.py`, `tests/test_pipeline.py`
+- **Verified:** A new test covers an invented app, an acronym and a leaked "match score 92"
+  (removed) against customer facts like family size and budget (kept). The offline
+  end-to-end test asserts the rule-based fallback's own reasons are never flagged. 30 tests
+  total. Not yet seen on real ranker output: the ranker got `503` in every live run so far.
+
+---
+
 ## 2026-09-22 — Deterministic check for invented features in the copy
 
 - **Problem:** The LLM critic passed copy that promised a "SmartThings app" for a fridge whose
@@ -207,11 +256,6 @@ Identified but not yet done. Ordered roughly by priority.
 > named extracted images, publicly served `/storage`) is acceptable under this assumption, so
 > multi-user items are out of scope rather than backlog.
 
-- **An uploaded catalog is forgotten on the next run.** `catalog_indexed` is only set when the
-  request includes a PDF, so a second run without re-uploading silently uses the demo catalog,
-  even though the index still holds the uploaded one. The index is also in-memory
-  (`QdrantClient(":memory:")`), so every server restart means re-uploading and re-embedding.
-  Reuse the current index when no file is sent, and persist it with `QdrantClient(path=...)`.
 - **The free model is often overloaded.** OpenRouter's free Nvidia provider returned `503
   provider overloaded` for most calls in several runs, so the brochure fell back to generic
   copy. The fallbacks work and are reported, but in practice the product needs a paid or
@@ -219,10 +263,6 @@ Identified but not yet done. Ordered roughly by priority.
 - **Generic invented claims still rely on the LLM critic.** The grounding check catches
   branded names, acronyms and numbers. Plain-language additions like "get alerts on your
   phone" still depend on the critic.
-- **Ranker explanations aren't fact-checked.** Only the cover copy goes through the grounding
-  check and critic. The per-product "Why this option fits your profile" explanation and matched
-  rules come straight from the ranker and are printed in the brochure. Run
-  `find_ungrounded_terms` on them against each product's specs.
 - **Critic and writer only see the top product**, while the brochure shows up to 4.
 - **The UI's progress messages are fake.** `setTimeout` timers switch the text at 3.5 s and
   7.5 s whatever the pipeline is actually doing, while real runs take 30–120 s. Stream real
@@ -246,7 +286,8 @@ Identified but not yet done. Ordered roughly by priority.
 - **Leftovers:** empty `frontend-nextjs/`. The service directory is still named
   `ai-services-python/` although it is now the whole backend.
 
-**Done** (moved out of the backlog on 2026-09-22 by the Python migration): silent fallbacks,
+**Done:** catalog reuse and persistence, and fact-checking ranker reasons (2026-09-22, see
+above). Also, by the Python migration: silent fallbacks,
 critic re-rolling instead of revising, retry stacking, silent form defaults, unverified template
 claims, timestamp job ids / CORS `*` / SMTP `InsecureSkipVerify`, and the dead car-era code
 (`ProductMatcher` now drives the ranking fallback).

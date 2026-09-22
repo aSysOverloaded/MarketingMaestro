@@ -115,6 +115,8 @@
                         <span class="text-[10px] text-slate-500">Supported format: PDF (Max 10MB)</span>
                         <input type="file" id="brochure-input" name="brochure" accept="application/pdf" class="hidden">
                     </div>
+                    <!-- Which catalog the next run will use; filled by refreshRagStats() -->
+                    <div id="catalog-status" class="text-[11px] text-slate-500"></div>
                 </div>
 
                 <button type="submit" id="submit-btn" class="glow-btn w-full py-3.5 rounded-xl font-bold text-sm tracking-wider uppercase text-white">
@@ -152,6 +154,7 @@
                         <div>
                             <h3 class="text-xl font-bold text-white">Recommendations Summary</h3>
                             <p class="text-xs text-slate-400">Trace ID: <span id="trace-id" class="font-mono"></span></p>
+                            <p class="text-xs text-slate-400">Catalog: <span id="result-catalog"></span></p>
                         </div>
                         <a id="download-link" href="#" target="_blank" class="glow-btn px-4 py-2 rounded-xl text-xs font-bold tracking-wider uppercase text-white flex items-center space-x-1.5">
                             <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -245,6 +248,26 @@
         const traceIdSpan = document.getElementById('trace-id');
         const downloadLink = document.getElementById('download-link');
         const warningsBox = document.getElementById('warnings-box');
+        const catalogStatus = document.getElementById('catalog-status');
+        const resultCatalog = document.getElementById('result-catalog');
+
+        function renderCatalogStatus(catalog) {
+            if (!catalog) {
+                catalogStatus.innerHTML = 'No catalog indexed — runs without an upload use the built-in demo catalog.';
+                return;
+            }
+            catalogStatus.innerHTML = `
+                Using indexed catalog <span class="text-slate-300 font-semibold">${escapeHtml(catalog.filename)}</span>
+                (${catalog.indexed_pages} pages). Upload a PDF to replace it, or
+                <button type="button" id="forget-catalog-btn" class="text-blue-400 hover:underline">forget it</button>.
+                ${catalog.embeddings !== 'real' ? '<span class="text-red-400">Indexed with mock embeddings — re-upload once GEMINI_API_KEY works.</span>' : ''}
+            `;
+            document.getElementById('forget-catalog-btn').addEventListener('click', async () => {
+                if (!confirm(`Forget "${catalog.filename}"? Runs will use the demo catalog until you upload another.`)) return;
+                await fetch('/api/rag/catalog', { method: 'DELETE' });
+                refreshRagStats();
+            });
+        }
         const warningsList = document.getElementById('warnings-list');
 
         function renderWarnings(warnings) {
@@ -300,6 +323,8 @@
                     : (stats.embeddings_mode === 'unknown'
                         ? `<div class="col-span-2 text-slate-500">No embedding calls made yet this process lifetime.</div>`
                         : '');
+
+                renderCatalogStatus(stats.catalog);
 
                 if (!stats.collection_exists) {
                     ragStatusDot.className = 'h-2 w-2 rounded-full bg-yellow-500';
@@ -472,6 +497,9 @@
                     downloadLink.classList.add('hidden');
                 }
                 renderWarnings(data.warnings);
+                resultCatalog.textContent = data.catalog
+                    ? `${data.catalog.filename} (${data.catalog.source === 'reused' ? 'previously indexed' : 'just uploaded'})`
+                    : 'built-in demo catalog';
                 
                 // Store job ID for the dynamic email sender
                 currentJobId = data.job_id;

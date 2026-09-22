@@ -15,7 +15,7 @@ from app.delivery.email import send_brochure
 from app.observability import log_stage
 from app.pipeline.brochure import JobContext, build_workflow, pdf_path_for
 from app.pipeline.workflow import WorkflowError
-from app.rag.search import get_stats, ingest_pdf, search_catalog
+from app.rag.search import clear_catalog, get_catalog, get_stats, ingest_pdf, search_catalog
 
 logging.basicConfig(
     level=logging.INFO,
@@ -71,17 +71,24 @@ def recommend(
     ctx = JobContext(job_id=job_id, trace_id=trace_id, customer=customer)
     ctx.warnings.extend(warnings)
 
+    catalog_source = None
     if brochure is not None and brochure.filename:
         pdf_bytes = brochure.file.read(MAX_UPLOAD_BYTES + 1)
         if len(pdf_bytes) > MAX_UPLOAD_BYTES:
             raise HTTPException(status_code=413, detail="Brochure PDF exceeds the 15 MB limit.")
         try:
-            result = ingest_pdf(pdf_bytes, job_id=job_id)
+            result = ingest_pdf(pdf_bytes, job_id=job_id, filename=brochure.filename)
             ctx.catalog_indexed = result["indexed_pages"] > 0
+            catalog_source = "uploaded" if ctx.catalog_indexed else None
             if not ctx.catalog_indexed:
                 ctx.warn("ingest", "The uploaded PDF has no extractable text (scanned images only?).")
         except Exception as e:
             ctx.warn("ingest", f"Failed to read the uploaded PDF ({e}).")
+    elif get_catalog():
+        # No file this time: keep using the catalog already indexed (it persists across runs
+        # and restarts). Previously this silently fell back to the demo catalog.
+        ctx.catalog_indexed = True
+        catalog_source = "reused"
 
     try:
         build_workflow().run(ctx)
@@ -104,6 +111,7 @@ def recommend(
         "budget_tier": ctx.profile.budget_tier,
         "recommendations": [{**r.model_dump(), "model": products[r.product_id].model} for r in ctx.recommendations],
         "pdf_url": f"/storage/generated_brochures/{ctx.pdf_path.name}" if ctx.pdf_path else None,
+        "catalog": {**get_catalog(), "source": catalog_source} if catalog_source else None,
         "copy_review": ctx.review,
         "rag_debug": ctx.rag_debug,
         "warnings": ctx.warnings,
@@ -135,6 +143,13 @@ def stats_endpoint():
         return {"reachable": True, **get_stats()}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/rag/catalog")
+def forget_catalog():
+    """Drop the indexed catalog so the next run uses the built-in demo catalog."""
+    clear_catalog()
+    return {"success": True}
 
 
 class SearchRequest(BaseModel):
