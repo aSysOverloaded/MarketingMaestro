@@ -88,7 +88,7 @@ def test_api_recommend_reports_progress_and_send_email(no_llm, submit_job):
     client = TestClient(app)
     job = submit_job(client, {"age": "40", "income": "90000", "family_size": "3", "location": "", "hobbies": "camping"})
     assert job["status"] == "done"
-    assert [s["name"] for s in job["steps"]] == ["profile", "recommend", "plan", "copy", "html", "pdf"]
+    assert [s["name"] for s in job["steps"]] == ["profile", "recommend", "plan", "copy", "product_copy", "html", "pdf"]
     assert all(s["status"] == "done" and s["ms"] is not None for s in job["steps"])
     body = job["result"]
     assert body["success"] and body["pdf_url"] is None and body["recommendations"][0]["model"]

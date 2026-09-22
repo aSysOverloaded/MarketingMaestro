@@ -21,6 +21,7 @@ from app.ai.extractor import extract_products
 from app.ai.grounding import find_ungrounded_in_text, find_ungrounded_terms
 from app.ai.llm import used_fallback
 from app.ai.planner import generate_plan
+from app.ai.product_copy import write_product_blurbs
 from app.ai.profile import classify_profile, rule_based_profile
 from app.ai.ranker import MAX_RECOMMENDATIONS, rank_products, score_products
 from app.ai.writer import generate_copy
@@ -72,6 +73,8 @@ class JobContext:
     selected_products: List[Product] = field(default_factory=list)
     sections: List[dict] = field(default_factory=list)
     copy: Optional[dict] = None
+    # product id -> one fact-checked sentence for that product's brochure page
+    product_blurbs: Dict[str, str] = field(default_factory=dict)
     review: Dict[str, Any] = field(default_factory=dict)
     html_path: Optional[Path] = None
     pdf_path: Optional[Path] = None
@@ -436,6 +439,20 @@ def copy_step(ctx: JobContext) -> None:
     ctx.warn("copy", f"Copy still rejected after {MAX_REVISIONS} revisions ({feedback}); used generic copy.")
 
 
+def product_copy_step(ctx: JobContext) -> None:
+    """One sentence per recommended product, so options 2-4 are not left with bare spec lists."""
+    ctx.note(f"Writing copy for {len(ctx.selected_products)} product(s)")
+    try:
+        ctx.product_blurbs = write_product_blurbs(ctx.profile.segment, ctx.selected_products, ctx.job_id)
+        _note_fallback(ctx, "product_copy", "product_copy")
+    except Exception as e:
+        ctx.warn("product_copy", f"Per-product copy unavailable ({e}); those pages show the specs only.")
+        return
+    missing = [p.id for p in ctx.selected_products if p.id not in ctx.product_blurbs]
+    if missing:
+        ctx.warn("product_copy", f"{len(missing)} product page(s) show specs only: the copy written for them was not supported by their specs.")
+
+
 def html_step(ctx: JobContext) -> None:
     ctx.html_path = compile_html(
         job_id=ctx.job_id,
@@ -444,6 +461,7 @@ def html_step(ctx: JobContext) -> None:
         copy=ctx.copy,
         recommendations=ctx.recommendations,
         products=ctx.selected_products,
+        blurbs=ctx.product_blurbs,
         output_dir=settings.storage_dir / "temp_brochures",
         catalog_brand=(get_catalog() or {}).get("brand"),
     )
@@ -489,6 +507,7 @@ def build_workflow() -> Workflow:
         Step("recommend", recommend_step),
         Step("plan", plan_step),
         Step("copy", copy_step),
+        Step("product_copy", product_copy_step),
         Step("html", html_step),
         Step("pdf", pdf_step, retries=1, compensate=_remove_pdf),
     ])

@@ -8,6 +8,37 @@ Open items that have been identified but not yet done live in [Backlog](#backlog
 
 ---
 
+## 2026-09-23 — Copy for every product, colours reach products, docs/DECISIONS.md
+
+### Every product page gets fact-checked copy
+Options 2-4 had no copy written about them - just the ranking reason and a spec list, because
+the writer only ever saw the top product. `app/ai/product_copy.py` writes one sentence per
+recommended product in a **single** call (a call per product would triple the slowest step),
+and each sentence is grounded against *that* product's specs. A sentence that fails is dropped
+rather than revised - it sits beside a spec list, so losing it costs less than another round
+trip - and the run reports how many pages ended up spec-only.
+
+### Colour and size rows reach the products they belong to
+Colours live in separate swatch blocks in the real catalogue, so extracted products had empty
+colour lists. Support blocks (no price or code of their own, under 500 chars, within 400 pt)
+are now merged into the nearest product block before filtering. Real catalogue: 644 → 533
+blocks after merging → 445 indexed, and **53% of product blocks now mention colours**.
+
+### docs/DECISIONS.md
+Every significant choice in one place: decision, why, alternatives rejected, measured evidence,
+trade-off, and when to revisit - plus the questions a sceptical reader asks ("how do you know
+it isn't making things up?", "why not OCR?", "what breaks at 100 users?") and a table of the
+numbers worth remembering.
+
+- **Files:** `app/ai/product_copy.py` (new), `app/pipeline/brochure.py`, `app/render/brochure.py`,
+  `app/rag/search.py`, `app/jobs.py`, `templates/brochure.html`, `docs/DECISIONS.md` (new),
+  `docs/PIPELINE.md`, `README.md`, tests
+- **Verified:** 80 tests, 5 new for per-product copy (a sentence each, an ungrounded sentence
+  dropped, unknown ids ignored, the pipeline reporting spec-only pages, and the blurb rendering
+  on the page). Block merging checked against the real catalogue.
+
+---
+
 ## 2026-09-23 — Catalog brand, product-block filtering, interest coverage, safe re-ingest
 
 ### Brand comes from the catalog, not from guessing product names
@@ -632,7 +663,6 @@ Identified but not yet done. Ordered roughly by priority.
 - **Generic invented claims still rely on the LLM critic.** The grounding check catches
   branded names, acronyms and numbers. Plain-language additions like "get alerts on your
   phone" still depend on the critic.
-- **Critic and writer only see the top product**, while the brochure shows up to 4.
 - **Re-run the speed benchmark on fresh quota.** The last comparison was confounded by mock
   vs real embeddings and rate-limit waits; the call-count and token reductions are solid but
   the wall-clock gain is unmeasured.

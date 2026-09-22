@@ -1,8 +1,10 @@
 # How the pipeline works, and why
 
 Reference for the brochure pipeline: what each phase does, what it costs, which LLM calls
-exist and which were deliberately removed, and what happens when something fails. Change
-history is in [IMPROVEMENTS.md](IMPROVEMENTS.md); this file is the current picture.
+exist and which were deliberately removed, and what happens when something fails.
+
+- **Why each choice was made**, with alternatives and evidence: [DECISIONS.md](DECISIONS.md)
+- **What changed and when**: [IMPROVEMENTS.md](IMPROVEMENTS.md)
 
 ## The shape of a run
 
@@ -19,6 +21,7 @@ per-step retries and rollback; the steps themselves are in
 | 2 | **recommend** – retrieve → extract → rank | 2 | ~20 s | Demo catalog and/or rule-based scoring, reported |
 | 3 | **plan** – outline the sections | 0 (opt-in) | instant | Default outline, reported |
 | 4 | **copy** – write, review, revise | 2+ per draft | ~18 s | Claim-free generic copy, reported |
+| 4b | **product_copy** – one checked sentence per product | 1 | ~8 s | Those pages show specs only, reported |
 | 5 | **html** – Jinja2 template | none | ~30 ms | Job fails |
 | 6 | **pdf** – headless Chromium | none | ~6 s | Job fails (no mock PDF) |
 
@@ -142,6 +145,11 @@ plus the segment. Then the draft is reviewed:
 > affected whether a draft was approved — only the banned-word scan and the spec checks do. It
 > was the slowest reviewer (~11.5 s). `USE_LLM_TONE_EVALUATOR=true` brings it back, in parallel
 > with the critic.
+
+### 4b. Per-product copy
+One LLM call writes a single sentence for every recommended product, each checked against that
+product's own specs; a sentence that fails is dropped (the page then shows its specs and the
+ranking reasons). Without this, options 2-4 had no copy written about them at all.
 
 ### 5–6. HTML and PDF
 Generated PDFs and compiled HTML are pruned to the most recent `KEEP_RECENT_OUTPUTS` (20) after

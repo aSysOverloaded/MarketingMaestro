@@ -14,6 +14,7 @@ STEP_LABELS = {
     "recommend": "Finding and ranking products",
     "plan": "Planning the brochure",
     "copy": "Writing and fact-checking the copy",
+    "product_copy": "Writing copy for each product",
     "html": "Building the brochure",
     "pdf": "Rendering the PDF",
 }

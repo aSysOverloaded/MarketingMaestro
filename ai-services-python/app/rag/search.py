@@ -357,6 +357,7 @@ def chunk_pdf_by_layout(pdf_bytes: bytes, dest_dir: str, job_id: str) -> tuple:
                 blocks = []
                 stats["pages_fallback"] += 1
 
+            blocks = merge_support_blocks(blocks)
             kept = [b for b in blocks if len(b.text) >= MIN_CHUNK_CHARS]
             if not kept:
                 continue
@@ -418,6 +419,41 @@ MIN_PRODUCT_BLOCK_SHARE = 0.3
 
 def looks_like_product(text: str) -> bool:
     return bool(_PRICE.search(text) or _PRODUCT_CODE.search(text))
+
+
+# A support block (colour swatch row, size run) states no price or code of its own but belongs
+# to the product beside it. Merging it in gives the extractor the colours it would otherwise
+# never see - the real catalogue lists them in separate blocks - and saves an embedding request.
+MAX_SUPPORT_BLOCK_CHARS = 500
+MAX_SUPPORT_DISTANCE = 400.0
+
+
+def merge_support_blocks(blocks: list) -> list:
+    """Fold colour/size blocks into the nearest product block on the same page."""
+    products = [b for b in blocks if looks_like_product(b.text)]
+    if not products:
+        return blocks
+
+    extra_text: dict = {}
+    merged_away = set()
+    for index, block in enumerate(blocks):
+        if block in products or len(block.text) > MAX_SUPPORT_BLOCK_CHARS:
+            continue
+        centre_x, centre_y = (block.x0 + block.x1) / 2, (block.top + block.bottom) / 2
+        nearest = min(products, key=lambda p: p.distance_to(centre_x, centre_y))
+        if nearest.distance_to(centre_x, centre_y) > MAX_SUPPORT_DISTANCE:
+            continue
+        extra_text.setdefault(id(nearest), []).append(block.text)
+        merged_away.add(index)
+
+    result = []
+    for index, block in enumerate(blocks):
+        if index in merged_away:
+            continue
+        if id(block) in extra_text:
+            block.text = block.text + "\n" + "\n".join(extra_text[id(block)])
+        result.append(block)
+    return result
 
 
 def filter_product_blocks(chunks: list, job_id: str = "unknown") -> list:

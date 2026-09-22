@@ -125,6 +125,7 @@ def compile_html(
     products: List[Product],
     output_dir: Path,
     catalog_brand: Optional[dict] = None,
+    blurbs: Optional[dict] = None,
 ) -> Path:
     catalog = brand_from_catalog(catalog_brand)
     by_id = {p.id: p for p in products}
@@ -143,6 +144,7 @@ def compile_html(
                 "features": product.features,
             },
             "rec": rec,
+            "blurb": (blurbs or {}).get(product.id),
         })
 
     html = _env.get_template("brochure.html").render(

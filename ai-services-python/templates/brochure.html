@@ -141,6 +141,10 @@
                 </div>
             </div>
 
+            {% if item.blurb %}
+            <p class="text-sm text-gray-700 leading-relaxed">{{ item.blurb }}</p>
+            {% endif %}
+
             <!-- 1. Why we chose this -->
             <div class="space-y-2">
                 <h4 class="font-extrabold text-sm text-gray-900 tracking-tight flex items-center">

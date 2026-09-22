@@ -93,6 +93,8 @@ logged to `storage/sent_emails/`.
 | `app/delivery/email.py` | SMTP delivery |
 | `templates/brochure.html` | The brochure template |
 
-**How it works and why** - each phase, its cost, which LLM calls exist and which were
-deliberately removed: [docs/PIPELINE.md](docs/PIPELINE.md).
+**How it works** - each phase, its cost, which LLM calls exist and which were deliberately
+removed: [docs/PIPELINE.md](docs/PIPELINE.md).
+**Why it works that way** - every design decision with its alternatives, evidence and
+trade-offs, plus the questions a reviewer will ask: [docs/DECISIONS.md](docs/DECISIONS.md).
 Change history and the open backlog: [docs/IMPROVEMENTS.md](docs/IMPROVEMENTS.md).
