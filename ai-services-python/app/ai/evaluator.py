@@ -1,16 +1,16 @@
 import json
 import logging
+import re
 
 from langchain_core.prompts import ChatPromptTemplate
 
-from app import diagnostics
-from app.ai.llm import get_chat_model
+from app.ai.llm import invoke_structured
 from app.ai.schemas import EvaluatorLLMOutput
 from app.observability import log_stage
 
 logger = logging.getLogger("ai.evaluator")
 
-BANNED_WORDS = ["cheap", "unreliable", "garbage", "competitor", "ford", "toyota"]
+BANNED_WORDS = ["cheap", "unreliable", "garbage", "competitor"]
 
 PROMPT = ChatPromptTemplate.from_template(
     """You are a brand quality evaluation agent (Evaluator).
@@ -23,37 +23,30 @@ Rate the tone, grade the overall suitability score (0-100), and determine if it 
 )
 
 
-def _deterministic_banned_word_scan(copy: dict) -> list:
+def banned_words_in(copy: dict) -> list:
     headline = copy.get("headline", "").lower()
     subheadline = copy.get("subheadline", "").lower()
     paragraphs = " ".join(copy.get("paragraphs", [])).lower()
     cta = copy.get("cta", "").lower()
     full_text = f"{headline} {subheadline} {paragraphs} {cta}"
-    return [w for w in BANNED_WORDS if w in full_text]
+    # Whole-word match only: a plain substring check flagged "affordable" as containing
+    # "ford" and hard-failed the whole workflow on perfectly normal budget-focused copy.
+    return [w for w in BANNED_WORDS if re.search(rf"\b{re.escape(w)}\b", full_text)]
 
 
 def evaluate_copy(copy: dict, job_id: str = "unknown") -> dict:
-    # This endpoint must never 500: it is the only step Go hard-fails the whole
-    # workflow on, and Go's own fallback for it silently drops banned-word
-    # enforcement. The deterministic scan always runs; the LLM call degrades
-    # gracefully instead of raising.
-    found_banned = _deterministic_banned_word_scan(copy)
+    # Must never raise: the deterministic banned-word scan always runs, and the LLM tone
+    # check degrades gracefully (reported via "degraded") instead of failing the review.
+    found_banned = banned_words_in(copy)
 
     try:
-        llm = get_chat_model("evaluator")
-        chain = PROMPT | llm.with_structured_output(EvaluatorLLMOutput, include_raw=True)
-        result = chain.invoke({"copy": json.dumps(copy)})
-        if result["parsing_error"] or result["parsed"] is None:
-            raise RuntimeError(str(result["parsing_error"]))
-
-        diagnostics.set_status("llm.evaluator", "real", None)
-        log_stage(logger, job_id, "evaluate", f"raw={result['raw']}")
-        parsed: EvaluatorLLMOutput = result["parsed"]
+        parsed = invoke_structured("evaluator", PROMPT, EvaluatorLLMOutput, {"copy": json.dumps(copy)}, job_id)
         llm_passed, tone_assessment, llm_score = parsed.passed, parsed.tone_assessment, parsed.score
+        degraded = False
     except Exception as e:
-        diagnostics.set_status("llm.evaluator", "degraded", str(e))
         log_stage(logger, job_id, "evaluate", f"LLM evaluation degraded, using deterministic-only result: {e}", level="warning")
         llm_passed, tone_assessment, llm_score = True, f"DEGRADED: {e}", 70
+        degraded = True
 
     passed = llm_passed and len(found_banned) == 0
     score = llm_score if len(found_banned) == 0 else min(llm_score, 50)
@@ -63,4 +56,5 @@ def evaluate_copy(copy: dict, job_id: str = "unknown") -> dict:
         "banned_words_found": found_banned,
         "tone_assessment": tone_assessment,
         "score": score,
+        "degraded": degraded,
     }

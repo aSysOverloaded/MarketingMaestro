@@ -2,10 +2,9 @@
 
 Format: [job=<id>] [<stage>] <message>
 
-This exact format is what lets a job's logs be grepped consistently across
-this service and correlated with the Go backend's [JobID: ...] tagged logs
-for the same request. Do not change the format without checking anywhere
-that greps or parses these lines.
+This exact format is what lets every log line for one request - workflow
+runner, each step, RAG, LLM calls - be grepped by job id. Do not change the
+format without checking anywhere that greps or parses these lines.
 """
 import logging
 

@@ -1,220 +1,162 @@
-import os
+"""Ingesting a catalog, and searching it.
+
+The pieces live next door: embeddings.py (text -> vectors), blocks.py (PDF -> product blocks),
+index.py (collections and the catalog record). This module is the sequence that uses them, and
+the query side.
+"""
+import hashlib
 import io
+import json
+import os
+import logging
 import time
 import uuid
-import hashlib
-import logging
+from datetime import datetime, timezone
+
 import pypdf
-from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, VectorParams, PointStruct
-import google.generativeai as genai
+from qdrant_client.models import PointStruct
 
 from app import diagnostics
+from app.ai.catalog_brand import detect_catalog_brand
 from app.config import settings
 from app.observability import log_stage
+from app.rag import extraction_cache, keyword
+from app.rag.blocks import (MIN_CHUNK_CHARS, chunk_pdf_by_layout, chunk_pdf_by_page,
+                            filter_product_blocks, find_boilerplate_lines, strip_boilerplate)
+from app.rag.embeddings import embed_text, embed_texts
+from app.rag.index import (INGEST_VERSION, _catalog_meta_path, _collection_exists, _current_collection,
+                           _drop_other_image_folders, collection_for, drop_other_collections,
+                           get_catalog, get_client, initialize_collection)
 
 logger = logging.getLogger("rag")
 
-# Initialize the Qdrant client in memory (100% free, local)
-client = QdrantClient(":memory:")
-COLLECTION_NAME = "catalog_products"
 
-# Content hash of the PDF currently held in the in-memory collection, and the ingest
-# result that produced it. A re-upload of byte-identical content (e.g. clicking
-# Analyze again after a downstream step like CriticStep rejects the copy) skips
-# re-embedding entirely instead of burning Gemini embedding quota for no reason -
-# the catalog itself didn't change, only something later in the pipeline failed.
-# Reset to None whenever the process restarts, since the in-memory index is too.
-_last_ingested_hash = None
-_last_ingest_result = None
-VECTOR_DIMENSION = 768  # text-embedding-004 was retired; gemini-embedding-001 defaults to 3072
-                        # dims but supports output_dimensionality to request this size instead
-EMBEDDING_MODEL = "models/gemini-embedding-001"
+logger = logging.getLogger("rag")
 
-def initialize_collection():
-    client.recreate_collection(
-        collection_name=COLLECTION_NAME,
-        vectors_config=VectorParams(size=VECTOR_DIMENSION, distance=Distance.COSINE),
-    )
 
-def embed_text(text: str, is_query: bool = False) -> list:
-    api_key = settings.gemini_api_key
-    if not settings.has_gemini_key:
-        msg = "GEMINI_API_KEY is not set (checked via app.config.settings, not the raw process environment)"
-        logger.warning(f"[embed_text] {msg}, using mock vector fallback (retrieval scores will all be ~1.000 and meaningless)")
-        diagnostics.set_status("embeddings", "mock", msg)
-        return [0.1] * VECTOR_DIMENSION
-
-    genai.configure(api_key=api_key)
-    task_type = "retrieval_query" if is_query else "retrieval_document"
-    try:
-        result = genai.embed_content(
-            model=EMBEDDING_MODEL,
-            content=text,
-            task_type=task_type,
-            output_dimensionality=VECTOR_DIMENSION,
-        )
-        diagnostics.set_status("embeddings", "real", None)
-        return result["embedding"]
-    except Exception as e:
-        # Fallback in case of rate limits or transient issues
-        logger.warning(f"[embed_text] embedding failed, using mock vector fallback: {e}")
-        diagnostics.set_status("embeddings", "mock", str(e))
-        return [0.1] * VECTOR_DIMENSION
-
-def embed_texts(texts: list, is_query: bool = False) -> list:
-    api_key = settings.gemini_api_key
-    if not settings.has_gemini_key:
-        msg = "GEMINI_API_KEY is not set (checked via app.config.settings, not the raw process environment)"
-        logger.warning(f"[embed_texts] {msg}, using mock vectors for {len(texts)} texts (retrieval scores will all be ~1.000 and meaningless)")
-        diagnostics.set_status("embeddings", "mock", msg)
-        return [[0.1] * VECTOR_DIMENSION] * len(texts)
-
-    genai.configure(api_key=api_key)
-    task_type = "retrieval_query" if is_query else "retrieval_document"
-    try:
-        result = genai.embed_content(
-            model=EMBEDDING_MODEL,
-            content=texts,
-            task_type=task_type,
-            output_dimensionality=VECTOR_DIMENSION,
-        )
-        diagnostics.set_status("embeddings", "real", None)
-        return result["embedding"]
-    except Exception as e:
-        logger.warning(f"[embed_texts] batch embedding failed for {len(texts)} texts, using mock vectors: {e}")
-        diagnostics.set_status("embeddings", "mock", str(e))
-        return [[0.1] * VECTOR_DIMENSION] * len(texts)
-
-def ingest_pdf(pdf_bytes: bytes, job_id: str = "unknown") -> dict:
-    global _last_ingested_hash, _last_ingest_result
-
+def ingest_pdf(pdf_bytes: bytes, job_id: str = "unknown", filename: str = "catalog.pdf") -> dict:
     content_hash = hashlib.sha256(pdf_bytes).hexdigest()
-    collections = client.get_collections().collections
-    collection_exists = any(c.name == COLLECTION_NAME for c in collections)
 
-    if collection_exists and content_hash == _last_ingested_hash and _last_ingest_result is not None:
+    # Re-uploading byte-identical content skips re-embedding (saves Gemini quota) - unless the
+    # stored vectors were mock ones from a run without a working key, which are worth replacing.
+    current = get_catalog()
+    if (current and current["sha256"] == content_hash and current.get("embeddings") == "real"
+            and current.get("ingest_version") == INGEST_VERSION):
         log_stage(logger, job_id, "ingest", f"content hash matches currently indexed catalog ({content_hash[:12]}...), skipping re-embed")
-        return _last_ingest_result
+        return {"success": True, "indexed_pages": current["indexed_pages"],
+                "indexed_chunks": current.get("indexed_chunks", current["indexed_pages"]),
+                "collection_name": current.get("collection"), "reused": True}
 
     start = time.monotonic()
     log_stage(logger, job_id, "ingest", f"starting ingest of {len(pdf_bytes)} bytes")
 
-    # 1. Clear and create the Qdrant collection
-    initialize_collection()
+    # 1. A fresh collection for this catalog (and goodbye to any previous one)
+    collection = collection_for(content_hash)
+    initialize_collection(collection)
 
-    # Resolve Go backend storage path for extracted images
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    backend_storage = os.path.abspath(os.path.join(current_dir, "..", "..", "..", "backend-go", "storage", "extracted_images"))
-    if not os.path.exists(os.path.join(backend_storage, "..")):
-        backend_storage = os.path.abspath(os.path.join(current_dir, "..", "..", "backend-go", "storage", "extracted_images"))
+    # One image folder per catalog, served at /storage/extracted_images/<catalog>/<name>.
+    # Per-catalog so a replaced catalog's images can be dropped without touching the ones a
+    # half-finished ingest might still need.
+    images_root = settings.storage_dir / "extracted_images"
+    backend_storage = str(images_root / content_hash[:16])
     os.makedirs(backend_storage, exist_ok=True)
 
-    # 2. Parse PDF content
-    pdf_file = io.BytesIO(pdf_bytes)
-    reader = pypdf.PdfReader(pdf_file)
-    
-    indexed_count = 0
-    skipped_empty_pages = 0
-    image_extract_failures = 0
+    # 2. Split the PDF into product-sized chunks (layout-aware, one per product block)
+    total_pages = len(pypdf.PdfReader(io.BytesIO(pdf_bytes)).pages)
+    try:
+        chunks, stats = chunk_pdf_by_layout(pdf_bytes, backend_storage, job_id)
+    except Exception as e:
+        log_stage(logger, job_id, "ingest", f"layout chunking failed ({e}); falling back to one chunk per page", level="warning")
+        chunks, stats = chunk_pdf_by_page(pdf_bytes, backend_storage, job_id)
+    if not chunks:
+        chunks, stats = chunk_pdf_by_page(pdf_bytes, backend_storage, job_id)
+
+    # Drop repeated navigation/header lines before embedding; the cleaned text is also what
+    # the extractor later reads.
+    texts = [c["content"] for c in chunks]
+    boilerplate = find_boilerplate_lines(texts)
+    if boilerplate:
+        log_stage(logger, job_id, "ingest", f"stripping {len(boilerplate)} repeated line(s) of page furniture")
+        for chunk in chunks:
+            chunk["content"] = strip_boilerplate(chunk["content"], boilerplate)
+        chunks = [c for c in chunks if len(c["content"]) >= MIN_CHUNK_CHARS]
+
+    chunks = filter_product_blocks(chunks, job_id)
+
+    # 3. Embed every chunk (in batches), then index it
     points = []
+    if chunks:
+        log_stage(logger, job_id, "ingest", f"embedding {len(chunks)} chunk(s) from {stats['pages_with_text']} page(s)")
+        vectors = embed_texts([c["content"] for c in chunks], is_query=False)
+        points = [PointStruct(id=str(uuid.uuid4()), vector=vector, payload=chunk)
+                  for chunk, vector in zip(chunks, vectors)]
 
-    # Store page texts and details for batch processing
-    pages_to_embed = []
-    page_details = []
-
-    for i, page in enumerate(reader.pages):
-        text = page.extract_text() or ""
-        text = text.strip()
-        if not text:
-            skipped_empty_pages += 1
-            continue
-
-        # Extract images from this page. Sorted largest-pixel-area-first (not extraction
-        # order) so that images[0] - which Go's recommend.go takes unconditionally as the
-        # brochure's hero image - is the most likely candidate to be the actual product
-        # photo rather than a small decorative/lifestyle banner image that happens to be
-        # placed first in the PDF's internal image order.
-        image_entries = []
-        try:
-            for img_idx, img_file in enumerate(page.images):
-                img_ext = os.path.splitext(img_file.name)[1] if img_file.name else ".png"
-                if not img_ext or img_ext == ".":
-                    img_ext = ".png"
-                img_name = f"page_{i+1}_img_{img_idx}{img_ext}"
-                dest_path = os.path.join(backend_storage, img_name)
-
-                with open(dest_path, "wb") as f:
-                    f.write(img_file.data)
-
-                area = 0
-                try:
-                    if img_file.image is not None:
-                        width, height = img_file.image.size
-                        area = width * height
-                except Exception:
-                    pass  # keep area=0 - falls to the end of the sort, not an extraction failure
-
-                image_entries.append((area, f"/storage/extracted_images/{img_name}"))
-        except Exception as e:
-            image_extract_failures += 1
-            log_stage(logger, job_id, "ingest", f"failed to extract images on page {i+1}: {e}", level="warning")
-
-        image_entries.sort(key=lambda entry: entry[0], reverse=True)
-        image_paths = [path for _, path in image_entries]
-
-        pages_to_embed.append(text)
-        page_details.append({
-            "page_number": i + 1,
-            "content": text,
-            "images": image_paths
-        })
-
-    # 3. Create vector embeddings in exactly ONE batch request
-    if pages_to_embed:
-        vectors = embed_texts(pages_to_embed, is_query=False)
-
-        # 4. Create Qdrant indexing points
-        for idx, details in enumerate(page_details):
-            point_id = str(uuid.uuid4())
-            points.append(PointStruct(
-                id=point_id,
-                vector=vectors[idx],
-                payload=details
-            ))
-            indexed_count += 1
-
-    # 5. Insert points into Qdrant index
+    # 4. Insert points into Qdrant index
     if points:
-        client.upsert(
-            collection_name=COLLECTION_NAME,
+        get_client().upsert(
+            collection_name=collection,
             wait=True,
             points=points
         )
 
+    # One LLM call per catalog: brand styling belongs to the catalog, not to each product name.
+    sample = "\n\n".join(c["content"] for c in chunks[:8])
+    brand = detect_catalog_brand(sample, job_id) if chunks else None
+    if brand:
+        log_stage(logger, job_id, "ingest", f"catalog brand detected: {brand['name']}")
+
+    indexed_count = stats["pages_with_text"]
     duration_ms = int((time.monotonic() - start) * 1000)
     diagnostics.set_ingest_meta({
         "job_id": job_id,
         "indexed_pages": indexed_count,
-        "skipped_empty_pages": skipped_empty_pages,
-        "image_extract_failures": image_extract_failures,
-        "total_pages": len(reader.pages),
+        "indexed_chunks": len(chunks),
+        "skipped_empty_pages": total_pages - indexed_count,
+        "image_extract_failures": stats["image_failures"],
+        "total_pages": total_pages,
         "duration_ms": duration_ms,
     })
     log_stage(
         logger, job_id, "ingest",
-        f"done: indexed={indexed_count} skipped_empty={skipped_empty_pages} "
-        f"image_failures={image_extract_failures} total_pages={len(reader.pages)} duration_ms={duration_ms}"
+        f"done: pages={indexed_count}/{total_pages} chunks={len(chunks)} "
+        f"image_failures={stats['image_failures']} duration_ms={duration_ms}"
     )
 
-    result = {
+    if not points:
+        # Nothing indexed (no usable text, or the quota ran out before the first batch): leave
+        # whatever catalog was in use alone rather than replacing it with an empty index.
+        log_stage(logger, job_id, "ingest", "no chunks indexed; keeping the previous catalog", level="warning")
+        get_client().delete_collection(collection_name=collection)
+        return {"success": False, "indexed_pages": 0, "indexed_chunks": 0,
+                "collection_name": None, "reused": False}
+
+    # Chunk ids describe positions in the index just rebuilt, so anything cached against the
+    # previous build is meaningless now.
+    extraction_cache.clear(content_hash)
+
+    _catalog_meta_path().write_text(json.dumps({
+        "filename": filename,
+        "sha256": content_hash,
+        "collection": collection,
+        "ingest_version": INGEST_VERSION,
+        "brand": brand,
+        "indexed_pages": indexed_count,
+        "indexed_chunks": len(chunks),
+        "indexed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "embeddings": diagnostics.get_status("embeddings")["mode"],
+    }), encoding="utf-8")
+
+    drop_other_collections(keep=collection)
+    _drop_other_image_folders(keep=content_hash[:16])
+
+    return {
         "success": True,
         "indexed_pages": indexed_count,
-        "collection_name": COLLECTION_NAME
+        "indexed_chunks": len(chunks),
+        "collection_name": collection,
+        "reused": False,
     }
-    _last_ingested_hash = content_hash
-    _last_ingest_result = result
-    return result
+
 
 def get_stats() -> dict:
     # embeddings_mode reflects the outcome of the LAST actual embed_content call, not just
@@ -223,64 +165,78 @@ def get_stats() -> dict:
     embeddings_mode = embed_status["mode"]
     embeddings_detail = embed_status["detail"]
 
-    collections = client.get_collections().collections
-    collection_exists = any(c.name == COLLECTION_NAME for c in collections)
-    if not collection_exists:
+    if not _collection_exists():
         return {
             "collection_exists": False,
             "point_count": 0,
+            "catalog": None,
             "last_ingest": diagnostics.get_ingest_meta(),
             "embeddings_mode": embeddings_mode,
             "embeddings_detail": embeddings_detail,
         }
 
-    info = client.get_collection(COLLECTION_NAME)
+    info = get_client().get_collection(_current_collection())
     return {
         "collection_exists": True,
         "point_count": info.points_count,
+        "catalog": get_catalog(),
         "last_ingest": diagnostics.get_ingest_meta(),
         "embeddings_mode": embeddings_mode,
         "embeddings_detail": embeddings_detail,
     }
 
+
+def _indexed_chunks() -> list:
+    """Every indexed block's payload, for the keyword index."""
+    points, _ = get_client().scroll(collection_name=_current_collection(), limit=100_000,
+                                    with_payload=True, with_vectors=False)
+    return [p.payload for p in points]
+
+
+def _as_match(payload: dict, score: float) -> dict:
+    return {
+        "chunk_id": payload.get("chunk_id", f"p{payload.get('page_number')}b0"),
+        "page_number": payload.get("page_number"),
+        "block_index": payload.get("block_index", 0),
+        "content": payload.get("content"),
+        "images": payload.get("images", []),
+        "score": score,
+    }
+
+
 def search_catalog(query: str, limit: int = 3, job_id: str = "unknown") -> list:
+    """Vector search and BM25 keyword search, fused by rank.
+
+    Vector search is good at meaning and poor at identifiers ("80000274", "TurboWash"); BM25 is
+    the reverse. Fusing the two rankings covers both (docs/DECISIONS.md D25).
+    """
     start = time.monotonic()
 
-    # Check if the collection exists
-    collections = client.get_collections().collections
-    collection_exists = any(c.name == COLLECTION_NAME for c in collections)
-    if not collection_exists:
+    if not _collection_exists():
         log_stage(logger, job_id, "search", f"query='{query}' collection does not exist yet, returning 0 matches", level="warning")
         return []
 
-    # 1. Generate query vector embedding
-    query_vector = embed_text(query, is_query=True)
+    collection = _current_collection()
+    # Each side contributes more candidates than requested, so fusion has something to work with.
+    candidates = max(limit * 3, 10)
 
-    # 2. Perform Cosine Similarity Search
-    search_results = client.search(
-        collection_name=COLLECTION_NAME,
-        query_vector=query_vector,
-        limit=limit
-    )
+    vector_hits = [
+        _as_match(hit.payload, hit.score)
+        for hit in get_client().search(collection_name=collection, query_vector=embed_text(query, is_query=True), limit=candidates)
+    ]
+    keyword_hits = [
+        _as_match(payload, score)
+        for payload, score in keyword.get_index(collection, _indexed_chunks).search(query, candidates)
+    ]
+    matches = keyword.fuse(vector_hits, keyword_hits, limit)
 
     duration_ms = int((time.monotonic() - start) * 1000)
-    if not search_results:
+    if not matches:
         log_stage(logger, job_id, "search", f"query='{query}' returned 0 matches (duration_ms={duration_ms})", level="warning")
     else:
-        scores = [f"{hit.score:.3f}" for hit in search_results]
-        pages = [hit.payload.get("page_number") for hit in search_results]
         log_stage(
             logger, job_id, "search",
-            f"query='{query}' matches={len(search_results)} scores={scores} pages={pages} duration_ms={duration_ms}"
+            f"query='{query}' matches={len(matches)} vector={len(vector_hits)} keyword={len(keyword_hits)} "
+            f"pages={[m['page_number'] for m in matches]} duration_ms={duration_ms}"
         )
-
-    # 3. Format and return matched payloads including images
-    matches = []
-    for hit in search_results:
-        matches.append({
-            "page_number": hit.payload.get("page_number"),
-            "content": hit.payload.get("content"),
-            "images": hit.payload.get("images", []),
-            "score": hit.score
-        })
     return matches

@@ -3,8 +3,7 @@ import logging
 
 from langchain_core.prompts import ChatPromptTemplate
 
-from app import diagnostics
-from app.ai.llm import get_chat_model
+from app.ai.llm import invoke_structured
 from app.ai.schemas import WriterOutput
 from app.observability import log_stage
 
@@ -13,7 +12,7 @@ logger = logging.getLogger("ai.writer")
 PROMPT = ChatPromptTemplate.from_template(
     """You are a professional copywriter agent. Write persuasive copy for a personalized marketing brochure.
 Customer Segment: {segment}
-Brochure Outline: {sections}
+Brochure Outline (if "none", choose a sensible structure yourself): {sections}
 Product Specifications: {candidate}
 
 Write a headline, subheadline, body paragraphs expanding on the planner outline points and product
@@ -23,29 +22,21 @@ IMPORTANT: Only reference features, materials, technologies, and specifications 
 Product Specifications above. Do not invent, imply, or add any capability, feature, or claim that is
 not present there, even if it sounds plausible or is common for this type of product. If you want to
 emphasize a quality (e.g. comfort, durability, convenience), tie it explicitly back to one of the
-listed specs rather than introducing a new unlisted feature to support it."""
+listed specs rather than introducing a new unlisted feature to support it.
+
+Reviewer feedback on the previous draft (address every point; "none" means this is the first draft):
+{feedback}"""
 )
 
 
-def generate_copy(segment: str, sections: list, candidate: dict, job_id: str = "unknown") -> dict:
-    llm = get_chat_model("writer")
-    chain = PROMPT | llm.with_structured_output(WriterOutput, include_raw=True)
-
-    result = chain.invoke({
+def generate_copy(segment: str, sections: list, candidate: dict, job_id: str = "unknown", feedback: str = "") -> dict:
+    parsed = invoke_structured("writer", PROMPT, WriterOutput, {
         "segment": segment,
-        "sections": json.dumps(sections),
+        "sections": json.dumps(sections) if sections else "none",
         "candidate": json.dumps(candidate),
-    })
+        "feedback": feedback or "none",
+    }, job_id)
 
-    if result["parsing_error"] or result["parsed"] is None:
-        diagnostics.set_status("llm.writer", "failed", str(result["parsing_error"]))
-        log_stage(logger, job_id, "write", f"structured output failed: {result['parsing_error']}", level="warning")
-        raise RuntimeError(f"writer structured output failed: {result['parsing_error']}")
-
-    diagnostics.set_status("llm.writer", "real", None)
-    log_stage(logger, job_id, "write", f"raw={result['raw']}")
-
-    parsed: WriterOutput = result["parsed"]
     if len(parsed.paragraphs) == 0:
         log_stage(logger, job_id, "write", "parsed OK but paragraphs is empty", level="warning")
 

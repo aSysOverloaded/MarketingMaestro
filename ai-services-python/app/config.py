@@ -12,25 +12,87 @@ one is expected - makes that failure mode visible at startup instead of three
 layers of fallback later.
 """
 import logging
+from pathlib import Path
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = logging.getLogger("config")
 
+# ai-services-python/ - templates, static and storage are resolved from here so the
+# service works regardless of which directory it is launched from.
+SERVICE_DIR = Path(__file__).resolve().parent.parent
+
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(env_file=SERVICE_DIR / ".env", env_file_encoding="utf-8", extra="ignore")
 
     # Used only for embeddings (app/rag/search.py) - OpenRouter has no embeddings endpoint,
     # so this is the one call that can't move off Gemini.
     gemini_api_key: str = ""
     gemini_model: str = "gemini-3.6-flash"
 
-    # Used for the 4 chat steps (planner/writer/critic/evaluator). Names mirror
-    # backend-go/.env so the two services share a mental model, even though each
-    # process reads its own .env file and the key must be set in both.
+    # Used for every chat step (profile, extraction, ranking, planner, writer, critic, evaluator).
     llm_api_url: str = "https://openrouter.ai/api/v1"
     llm_api_key: str = ""
-    llm_model: str = "nvidia/nemotron-3-super-120b-a12b:free"
+    # Free-tier lineups rotate and get overloaded; check docs/IMPROVEMENTS.md for what last worked.
+    llm_model: str = "nex-agi/nex-n2.5-pro:free"
+    # Optional stronger model for the spec critic only (same endpoint/key). Fact-checking is
+    # where a weak model hurts most, and it is one call per draft. Empty = use LLM_MODEL.
+    llm_critic_model: str = ""
+
+    # Backup provider, used when a call to the primary one fails (free tiers are frequently
+    # overloaded or capped). Normally a different vendor, so both rarely fail at once.
+    llm_fallback_api_url: str = ""
+    llm_fallback_api_key: str = ""
+    llm_fallback_model: str = ""
+
+    # --- Which LLM calls the pipeline makes -------------------------------------------
+    # Each of these costs one round trip (~5-12 s on a free model) and is off by default
+    # because measurement showed it buys little. Turn one on to compare with
+    # `python -m scripts.benchmark`, and see docs/PIPELINE.md for the reasoning.
+
+    # Segment/budget tier from an LLM instead of the rules in app/ai/profile.py. The rules use
+    # the same inputs (hobbies, income, family size) and are deterministic and instant.
+    use_llm_profile: bool = False
+    # A separate call that outlines the brochure sections before the writer writes them. The
+    # outline only ever feeds the writer, which can structure the copy itself.
+    use_llm_planner: bool = False
+    # An LLM tone/readability score alongside the critic. Its verdict never affects whether a
+    # draft is approved - only the deterministic banned-word scan and the spec checks do - so
+    # it is a call whose result is merely reported.
+    use_llm_tone_evaluator: bool = False
+
+    # Chat-model call limits. Kept tight on purpose: every step has its own fallback, so a
+    # hung provider should fail over quickly rather than hold the request for minutes.
+    llm_timeout_seconds: float = 60.0
+    llm_max_retries: int = 2
+
+    # Optional SMTP for /api/send-email. Unset host/user = email is logged locally, not sent.
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_user: str = ""
+    smtp_pass: str = ""
+
+    # Largest catalog PDF accepted by /api/recommend. Ingest time and embedding quota scale
+    # with page count, not file size, so a big-but-scanned PDF is cheap and a big text-heavy
+    # one is not.
+    max_upload_mb: int = 50
+
+    # Skip PDF rendering entirely (e.g. no Chromium available). The response then carries
+    # pdf_url = null plus a warning - there is no mock PDF.
+    disable_pdf: bool = False
+
+    # Root for generated files (compiled HTML, PDFs, extracted catalog images, email logs).
+    # Relative paths resolve against this service's directory, not the process cwd.
+    storage_dir: Path = SERVICE_DIR / "storage"
+
+    @property
+    def has_fallback_provider(self) -> bool:
+        return bool(self.llm_fallback_api_url.strip() and self.llm_fallback_api_key.strip() and self.llm_fallback_model.strip())
+
+    @property
+    def has_smtp(self) -> bool:
+        return bool(self.smtp_host.strip() and self.smtp_user.strip())
 
     @property
     def has_gemini_key(self) -> bool:
@@ -56,8 +118,16 @@ def log_startup_config() -> None:
     logger.info(f"[config] GEMINI_MODEL={settings.gemini_model}")
 
     if settings.has_llm_key:
-        logger.info(f"[config] LLM_API_KEY is set (length={len(settings.llm_api_key.strip())}) - used for plan/write/critic/evaluate")
+        logger.info(f"[config] LLM_API_KEY is set (length={len(settings.llm_api_key.strip())}) - used for every chat step")
     else:
-        logger.warning("[config] LLM_API_KEY is NOT set - plan/write/critic will fail loud, evaluate will degrade")
+        logger.warning("[config] LLM_API_KEY is NOT set - every chat step will run on its deterministic fallback")
     logger.info(f"[config] LLM_API_URL={settings.llm_api_url}")
     logger.info(f"[config] LLM_MODEL={settings.llm_model}")
+    if settings.llm_critic_model:
+        logger.info(f"[config] LLM_CRITIC_MODEL={settings.llm_critic_model}")
+    if settings.has_fallback_provider:
+        logger.info(f"[config] fallback provider: {settings.llm_fallback_model} @ {settings.llm_fallback_api_url}")
+    else:
+        logger.warning("[config] no fallback provider configured (LLM_FALLBACK_*) - a failed call means that step falls back to its deterministic path")
+    logger.info(f"[config] SMTP {'configured for ' + settings.smtp_host if settings.has_smtp else 'NOT configured - emails are logged locally'}")
+    logger.info(f"[config] PDF rendering {'DISABLED' if settings.disable_pdf else 'enabled'}; storage_dir={settings.storage_dir}")
