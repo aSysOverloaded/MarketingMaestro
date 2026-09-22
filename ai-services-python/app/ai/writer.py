@@ -3,8 +3,7 @@ import logging
 
 from langchain_core.prompts import ChatPromptTemplate
 
-from app import diagnostics
-from app.ai.llm import get_chat_model
+from app.ai.llm import invoke_structured
 from app.ai.schemas import WriterOutput
 from app.observability import log_stage
 
@@ -31,25 +30,13 @@ Reviewer feedback on the previous draft (address every point; "none" means this 
 
 
 def generate_copy(segment: str, sections: list, candidate: dict, job_id: str = "unknown", feedback: str = "") -> dict:
-    llm = get_chat_model("writer")
-    chain = PROMPT | llm.with_structured_output(WriterOutput, include_raw=True)
-
-    result = chain.invoke({
+    parsed = invoke_structured("writer", PROMPT, WriterOutput, {
         "segment": segment,
         "sections": json.dumps(sections),
         "candidate": json.dumps(candidate),
         "feedback": feedback or "none",
-    })
+    }, job_id)
 
-    if result["parsing_error"] or result["parsed"] is None:
-        diagnostics.set_status("llm.writer", "failed", str(result["parsing_error"]))
-        log_stage(logger, job_id, "write", f"structured output failed: {result['parsing_error']}", level="warning")
-        raise RuntimeError(f"writer structured output failed: {result['parsing_error']}")
-
-    diagnostics.set_status("llm.writer", "real", None)
-    log_stage(logger, job_id, "write", f"raw={result['raw']}")
-
-    parsed: WriterOutput = result["parsed"]
     if len(parsed.paragraphs) == 0:
         log_stage(logger, job_id, "write", "parsed OK but paragraphs is empty", level="warning")
 

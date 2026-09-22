@@ -3,8 +3,7 @@ import logging
 
 from langchain_core.prompts import ChatPromptTemplate
 
-from app import diagnostics
-from app.ai.llm import get_chat_model
+from app.ai.llm import invoke_structured
 from app.ai.schemas import PlannerOutput
 from app.observability import log_stage
 
@@ -20,23 +19,11 @@ Plan the sections of the brochure. Each section needs a title and a list of key 
 
 
 def generate_plan(segment: str, recommendation: dict, job_id: str = "unknown") -> list:
-    llm = get_chat_model("planner")
-    chain = PROMPT | llm.with_structured_output(PlannerOutput, include_raw=True)
-
-    result = chain.invoke({
+    parsed = invoke_structured("planner", PROMPT, PlannerOutput, {
         "segment": segment,
         "recommendation": json.dumps(recommendation),
-    })
+    }, job_id)
 
-    if result["parsing_error"] or result["parsed"] is None:
-        diagnostics.set_status("llm.planner", "failed", str(result["parsing_error"]))
-        log_stage(logger, job_id, "plan", f"structured output failed: {result['parsing_error']}", level="warning")
-        raise RuntimeError(f"planner structured output failed: {result['parsing_error']}")
-
-    diagnostics.set_status("llm.planner", "real", None)
-    log_stage(logger, job_id, "plan", f"raw={result['raw']}")
-
-    parsed: PlannerOutput = result["parsed"]
     if len(parsed.sections) == 0:
         log_stage(logger, job_id, "plan", "parsed OK but sections is empty", level="warning")
 

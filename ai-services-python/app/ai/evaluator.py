@@ -4,8 +4,7 @@ import re
 
 from langchain_core.prompts import ChatPromptTemplate
 
-from app import diagnostics
-from app.ai.llm import get_chat_model
+from app.ai.llm import invoke_structured
 from app.ai.schemas import EvaluatorLLMOutput
 from app.observability import log_stage
 
@@ -41,19 +40,10 @@ def evaluate_copy(copy: dict, job_id: str = "unknown") -> dict:
     found_banned = banned_words_in(copy)
 
     try:
-        llm = get_chat_model("evaluator")
-        chain = PROMPT | llm.with_structured_output(EvaluatorLLMOutput, include_raw=True)
-        result = chain.invoke({"copy": json.dumps(copy)})
-        if result["parsing_error"] or result["parsed"] is None:
-            raise RuntimeError(str(result["parsing_error"]))
-
-        diagnostics.set_status("llm.evaluator", "real", None)
-        log_stage(logger, job_id, "evaluate", f"raw={result['raw']}")
-        parsed: EvaluatorLLMOutput = result["parsed"]
+        parsed = invoke_structured("evaluator", PROMPT, EvaluatorLLMOutput, {"copy": json.dumps(copy)}, job_id)
         llm_passed, tone_assessment, llm_score = parsed.passed, parsed.tone_assessment, parsed.score
         degraded = False
     except Exception as e:
-        diagnostics.set_status("llm.evaluator", "degraded", str(e))
         log_stage(logger, job_id, "evaluate", f"LLM evaluation degraded, using deterministic-only result: {e}", level="warning")
         llm_passed, tone_assessment, llm_score = True, f"DEGRADED: {e}", 70
         degraded = True

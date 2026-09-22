@@ -3,8 +3,7 @@ import logging
 
 from langchain_core.prompts import ChatPromptTemplate
 
-from app import diagnostics
-from app.ai.llm import get_chat_model
+from app.ai.llm import invoke_structured
 from app.ai.schemas import CriticOutput
 from app.observability import log_stage
 
@@ -31,20 +30,8 @@ Determine if the copy has passed or failed the audit. If failed, list each unsup
 
 
 def audit_copy(copy: dict, candidate: dict, job_id: str = "unknown") -> dict:
-    llm = get_chat_model("critic")
-    chain = PROMPT | llm.with_structured_output(CriticOutput, include_raw=True)
-
-    result = chain.invoke({
+    parsed = invoke_structured("critic", PROMPT, CriticOutput, {
         "copy": json.dumps(copy),
         "candidate": json.dumps(candidate),
-    })
-
-    if result["parsing_error"] or result["parsed"] is None:
-        diagnostics.set_status("llm.critic", "failed", str(result["parsing_error"]))
-        log_stage(logger, job_id, "critic", f"structured output failed: {result['parsing_error']}", level="warning")
-        raise RuntimeError(f"critic structured output failed: {result['parsing_error']}")
-
-    diagnostics.set_status("llm.critic", "real", None)
-    log_stage(logger, job_id, "critic", f"raw={result['raw']}")
-
-    return result["parsed"].model_dump()
+    }, job_id)
+    return parsed.model_dump()

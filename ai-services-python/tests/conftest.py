@@ -10,15 +10,11 @@ def _offline(*_args, **_kwargs):
 
 @pytest.fixture
 def no_llm(monkeypatch):
-    """Every chat-model call fails, forcing each step onto its fallback path."""
-    import app.ai.critic
-    import app.ai.evaluator
+    """Every chat-model call fails, forcing each step onto its deterministic fallback.
+    One patch point covers every AI module, since they all go through invoke_structured."""
     import app.ai.llm
-    import app.ai.planner
-    import app.ai.writer
 
-    for module in (app.ai.llm, app.ai.planner, app.ai.writer, app.ai.critic, app.ai.evaluator):
-        monkeypatch.setattr(module, "get_chat_model", _offline)
+    monkeypatch.setattr(app.ai.llm, "_invoke_once", _offline)
 
 
 @pytest.fixture(autouse=True)

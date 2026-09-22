@@ -8,6 +8,55 @@ Open items that have been identified but not yet done live in [Backlog](#backlog
 
 ---
 
+## 2026-09-23 — Backup LLM provider; Gemini as primary; 27% faster overall
+
+### One call path, with an automatic backup provider
+- **Problem:** Free tiers fail constantly - `503 overloaded` and `429 daily cap` - and each
+  failed call costs a step its AI output, so runs silently degraded to generic copy. Switching
+  to another free model on the same vendor does not help: the daily cap is per account.
+- **Fix:**
+  - `planner`, `writer`, `critic` and `evaluator` now go through the same
+    `llm.invoke_structured` as the newer chains, instead of each repeating the call/parse/
+    diagnostics logic. One call path for every AI step.
+  - A call that fails on the primary provider is retried once on a **backup provider**
+    (`LLM_FALLBACK_API_URL` / `_API_KEY` / `_MODEL`), normally a different vendor, so both
+    rarely fail at once. Parsing failures also fail over, since another model may parse fine.
+    Both failing = the step's existing deterministic fallback, as before.
+  - When the backup answers, the run says so in `warnings` ("answered by the fallback
+    provider"), so a run never silently depends on the backup. Diagnostics record
+    `real` / `fallback` / `failed` per purpose.
+- **Config now:** primary is **Gemini** `gemini-3.1-flash-lite` via its OpenAI-compatible
+  endpoint (`https://generativelanguage.googleapis.com/v1beta/openai/`), backup is OpenRouter
+  `nex-agi/nex-n2.5-pro:free`. Both free. The Gemini key already existed for embeddings.
+- **Files:** `app/ai/llm.py`, `app/ai/{planner,writer,critic,evaluator}.py`,
+  `app/pipeline/brochure.py`, `app/config.py`, `.env.example`, `tests/test_llm_fallback.py`
+  (new), `tests/conftest.py`
+
+### Benchmark: baseline vs now (3 runs each, median)
+
+| | baseline (OpenRouter, sequential review) | now (Gemini + parallel review) |
+|---|---|---|
+| total | 165.8 s | **120.9 s** |
+| copy step | 100.7 s | **31.7 s** |
+| writer call | 32.4 s | 15.9 s |
+| writer calls per run | 1.7 | 1.0 |
+| critic / evaluator call | 16.7 / 14.4 s | 8.2 / 8.6 s |
+| runs with generic copy | 1 of 3 | **0** |
+| runs with fallbacks | 1 of 3 | **0** |
+| runs with unsupported claims in final copy | 0 | **0** |
+
+Copy step −69%, total −27%, and quality held: every run produced real AI copy, approved on the
+first draft, with nothing unsupported reaching the brochure. Remaining variance is single slow
+provider calls (one critic call 86 s, one ranking call 69 s in otherwise normal runs) - exactly
+what the backup provider exists for.
+
+- **Verified:** 41 tests (6 new for the fallback: backup untouched when the primary works,
+  retried when it fails, both-failed recorded and raised, no backup configured, per-provider
+  url/key/model, and the pipeline warning when the backup answered). The `no_llm` fixture now
+  patches one call point instead of five modules.
+
+---
+
 ## 2026-09-22 — Benchmark harness; faster review in the copy step
 
 ### How speed is measured
@@ -346,14 +395,14 @@ Identified but not yet done. Ordered roughly by priority.
   branded names, acronyms and numbers. Plain-language additions like "get alerts on your
   phone" still depend on the critic.
 - **Critic and writer only see the top product**, while the brochure shows up to 4.
-- **The copy step is still most of the run time.** The writer takes 23–49 s per draft on the
-  free model; the review is now parallel, and skipped when the instant checks already failed a
+- **The copy step is still the largest single step** (31.7 s of a 120.9 s run; writer ~16 s per
+  draft on Gemini flash-lite); the review is now parallel, and skipped when the instant checks already failed a
   draft. Remaining options: a faster writer model, fewer revisions on the free tier, or
   dropping the LLM tone evaluator. Its score never affects the approve/revise decision; only
   the deterministic banned-word scan does, so it costs about 1.3 calls per run for nothing.
 - **Free-tier daily request cap.** OpenRouter's free models allow a limited number of requests
-  per day unless the account has credits (the `429` message says 10 credits unlock 1000/day).
-  A run makes about 8 LLM calls, so the cap limits both usage and benchmarking.
+  per day unless the account has credits. Now mitigated rather than solved: it is the backup
+  provider, and Gemini's free tier is primary.
 - **UI text sizes are wrong in places.** `static/index.html` uses Tailwind arbitrary-size
   classes (`text-[10px]` and similar) that the Tailwind 2.2 CDN build doesn't support, so those
   labels render at the default size.

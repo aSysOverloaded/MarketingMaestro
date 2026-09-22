@@ -40,6 +40,12 @@ class Settings(BaseSettings):
     # where a weak model hurts most, and it is one call per draft. Empty = use LLM_MODEL.
     llm_critic_model: str = ""
 
+    # Backup provider, used when a call to the primary one fails (free tiers are frequently
+    # overloaded or capped). Normally a different vendor, so both rarely fail at once.
+    llm_fallback_api_url: str = ""
+    llm_fallback_api_key: str = ""
+    llm_fallback_model: str = ""
+
     # Chat-model call limits. Kept tight on purpose: every step has its own fallback, so a
     # hung provider should fail over quickly rather than hold the request for minutes.
     llm_timeout_seconds: float = 60.0
@@ -58,6 +64,10 @@ class Settings(BaseSettings):
     # Root for generated files (compiled HTML, PDFs, extracted catalog images, email logs).
     # Relative paths resolve against this service's directory, not the process cwd.
     storage_dir: Path = SERVICE_DIR / "storage"
+
+    @property
+    def has_fallback_provider(self) -> bool:
+        return bool(self.llm_fallback_api_url.strip() and self.llm_fallback_api_key.strip() and self.llm_fallback_model.strip())
 
     @property
     def has_smtp(self) -> bool:
@@ -94,5 +104,9 @@ def log_startup_config() -> None:
     logger.info(f"[config] LLM_MODEL={settings.llm_model}")
     if settings.llm_critic_model:
         logger.info(f"[config] LLM_CRITIC_MODEL={settings.llm_critic_model}")
+    if settings.has_fallback_provider:
+        logger.info(f"[config] fallback provider: {settings.llm_fallback_model} @ {settings.llm_fallback_api_url}")
+    else:
+        logger.warning("[config] no fallback provider configured (LLM_FALLBACK_*) - a failed call means that step falls back to its deterministic path")
     logger.info(f"[config] SMTP {'configured for ' + settings.smtp_host if settings.has_smtp else 'NOT configured - emails are logged locally'}")
     logger.info(f"[config] PDF rendering {'DISABLED' if settings.disable_pdf else 'enabled'}; storage_dir={settings.storage_dir}")

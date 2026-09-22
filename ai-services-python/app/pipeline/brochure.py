@@ -18,6 +18,7 @@ from app.ai.critic import audit_copy
 from app.ai.evaluator import banned_words_in, evaluate_copy
 from app.ai.extractor import extract_products
 from app.ai.grounding import find_ungrounded_in_text, find_ungrounded_terms
+from app.ai.llm import used_fallback
 from app.ai.planner import generate_plan
 from app.ai.profile import classify_profile, rule_based_profile
 from app.ai.ranker import rank_products, score_products
@@ -77,6 +78,8 @@ class JobContext:
     warnings: List[Dict[str, str]] = field(default_factory=list)
     # Receives short human-readable progress notes ("Writing draft 2") for the UI.
     on_note: Optional[Callable[[str], None]] = None
+    # Notices already emitted this run, so a repeated condition warns once.
+    seen_notices: set = field(default_factory=set)
 
     def warn(self, step: str, message: str) -> None:
         self.warnings.append({"step": step, "message": message})
@@ -89,9 +92,18 @@ class JobContext:
 
 # --- Steps ---------------------------------------------------------------------------
 
+def _note_fallback(ctx: JobContext, purpose: str, step: str) -> None:
+    """Say so when the primary provider failed and the backup answered instead - otherwise a
+    run silently depends on the backup and nobody notices the primary is down or capped."""
+    if used_fallback(purpose) and f"fallback:{purpose}" not in ctx.seen_notices:
+        ctx.seen_notices.add(f"fallback:{purpose}")
+        ctx.warn(step, f"The {purpose} step was answered by the fallback provider; the primary one failed.")
+
+
 def profile_step(ctx: JobContext) -> None:
     try:
         ctx.profile = classify_profile(ctx.customer, ctx.job_id)
+        _note_fallback(ctx, "profile", "profile")
     except Exception as e:
         ctx.profile = rule_based_profile(ctx.customer, ctx.job_id)
         ctx.warn("profile", f"AI profiling unavailable ({e}); used rule-based segment '{ctx.profile.segment}'.")
@@ -127,6 +139,7 @@ def _retrieve_candidates(ctx: JobContext) -> List[Product]:
     ctx.note(f"Extracting products from {len(matches)} matched page(s)")
     pages_text = "".join(f"--- PAGE {m['page_number']} ---\n{m['content']}\n" for m in matches)
     products = extract_products(pages_text, ctx.job_id)
+    _note_fallback(ctx, "extractor", "recommend")
     images_by_page = {m["page_number"]: m["images"] for m in matches}
     for p in products:
         images = images_by_page.get(p.page_number) or []
@@ -154,6 +167,7 @@ def recommend_step(ctx: JobContext) -> None:
     ctx.note(f"Ranking {len(candidates)} products")
     try:
         ctx.recommendations = rank_products(ctx.customer, ctx.profile.segment, ctx.profile.budget_tier, candidates, ctx.job_id)
+        _note_fallback(ctx, "ranker", "recommend")
     except Exception as e:
         ctx.recommendations = score_products(ctx.customer, candidates, ctx.job_id)
         ctx.warn("recommend", f"AI ranking unavailable ({e}); used rule-based scoring.")
@@ -204,6 +218,7 @@ def _ground_recommendations(ctx: JobContext) -> None:
 def plan_step(ctx: JobContext) -> None:
     try:
         ctx.sections = generate_plan(ctx.profile.segment, ctx.recommendations[0].model_dump(), job_id=ctx.job_id)
+        _note_fallback(ctx, "planner", "plan")
     except Exception as e:
         ctx.sections = FALLBACK_SECTIONS
         ctx.warn("plan", f"AI content planner unavailable ({e}); used a default outline.")
@@ -262,6 +277,7 @@ def _review(ctx: JobContext, draft: dict, product: dict, warned: set, attempt: i
         evaluation = pool.submit(run_evaluator).result()
         try:
             critic = critic_future.result()
+            _note_fallback(ctx, "critic", "copy")
         except Exception as e:
             critic = None
             if "critic" not in warned:
@@ -294,6 +310,7 @@ def copy_step(ctx: JobContext) -> None:
         try:
             with _timed(ctx, "writer", attempt + 1):
                 draft = generate_copy(segment, ctx.sections, product, job_id=ctx.job_id, feedback=feedback)
+            _note_fallback(ctx, "writer", "copy")
         except Exception as e:
             ctx.copy = fallback_copy(segment)
             ctx.warn("copy", f"AI copywriter unavailable ({e}); used generic copy.")
