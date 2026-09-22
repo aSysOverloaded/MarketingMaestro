@@ -71,3 +71,74 @@ def test_run_without_upload_reuses_the_indexed_catalog_until_forgotten(no_llm, s
     third = submit_job(client, form)["result"]
     assert third["catalog"] is None and not third["rag_debug"]["active"]
     assert client.get("/api/rag/stats").json()["catalog"] is None
+
+
+def test_large_catalogs_are_embedded_in_batches(monkeypatch):
+    """One request per EMBED_BATCH pages. A single request for a whole large catalog used to
+    fail and drop the entire index to mock vectors."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "gemini_api_key", "test-key")
+    monkeypatch.setattr(search.genai, "configure", lambda **kw: None)
+    batches = []
+
+    def fake_embed(model, content, task_type, output_dimensionality):
+        batches.append(len(content))
+        assert all(len(c) <= search.MAX_EMBED_CHARS for c in content)
+        return {"embedding": [[0.2] * search.VECTOR_DIMENSION] * len(content)}
+
+    monkeypatch.setattr(search.genai, "embed_content", fake_embed)
+
+    pages = [f"page {i} " + "x" * 20000 for i in range(120)]
+    vectors = search.embed_texts(pages)
+    assert len(vectors) == 120
+    assert batches == [search.EMBED_BATCH, search.EMBED_BATCH, 20]
+    assert search.diagnostics.get_status("embeddings")["mode"] == "real"
+
+
+def test_one_failing_batch_does_not_fake_the_whole_catalog(monkeypatch):
+    """A non-retryable failure degrades only its own batch (rate limits are retried instead;
+    see test_rate_limited_batches_wait_and_retry)."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "gemini_api_key", "test-key")
+    monkeypatch.setattr(search.genai, "configure", lambda **kw: None)
+    calls = {"n": 0}
+
+    def flaky(model, content, task_type, output_dimensionality):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("malformed request")
+        return {"embedding": [[0.2] * search.VECTOR_DIMENSION] * len(content)}
+
+    monkeypatch.setattr(search.genai, "embed_content", flaky)
+
+    vectors = search.embed_texts([f"page {i}" for i in range(120)])
+    assert len(vectors) == 120
+    assert vectors[0][0] == 0.2 and vectors[60][0] == 0.1  # batch 1 real, batch 2 mock
+    assert search.diagnostics.get_status("embeddings")["mode"] == "mock"
+
+
+def test_rate_limited_batches_wait_and_retry(monkeypatch):
+    """Free-tier embedding quota is per minute, so a big catalog hits it mid-ingest. Waiting
+    keeps the catalog fully indexed instead of leaving later pages on mock vectors."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "gemini_api_key", "test-key")
+    monkeypatch.setattr(search.genai, "configure", lambda **kw: None)
+    slept = []
+    monkeypatch.setattr(search.time, "sleep", slept.append)
+    calls = {"n": 0}
+
+    def rate_limited_once(model, content, task_type, output_dimensionality):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("429 quota exceeded ... retry_delay { seconds: 21 }")
+        return {"embedding": [[0.3] * search.VECTOR_DIMENSION] * len(content)}
+
+    monkeypatch.setattr(search.genai, "embed_content", rate_limited_once)
+
+    vectors = search.embed_texts([f"page {i}" for i in range(10)])
+    assert slept == [23]  # provider's own retry_delay + a margin
+    assert vectors[0][0] == 0.3  # real vectors, not the mock fallback
+    assert search.diagnostics.get_status("embeddings")["mode"] == "real"

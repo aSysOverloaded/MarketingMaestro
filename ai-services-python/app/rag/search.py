@@ -1,6 +1,7 @@
 import os
 import io
 import json
+import re
 import time
 import uuid
 import hashlib
@@ -44,6 +45,22 @@ VECTOR_DIMENSION = 768  # text-embedding-004 was retired; gemini-embedding-001 d
                         # dims but supports output_dimensionality to request this size instead
 EMBEDDING_MODEL = "models/gemini-embedding-001"
 
+# One request per EMBED_BATCH pages instead of one request for the whole catalog. A big
+# catalog (hundreds of pages) made that single request fail, and the whole index silently
+# fell back to mock vectors.
+EMBED_BATCH = 50
+# Embedding models cap input length; a page far longer than this adds nothing to retrieval.
+MAX_EMBED_CHARS = 8000
+# Extracted page images are only ever used to pick one hero image per page, so keeping every
+# image of a large catalog just fills the disk.
+MAX_IMAGES_PER_PAGE = 2
+MIN_IMAGE_BYTES = 4096  # skip icons, logos, separators
+# Free-tier embedding quota is per minute and counts one request per text, so a large catalog
+# WILL hit it mid-ingest. Waiting and retrying is the difference between a fully indexed
+# catalog and one whose last pages hold meaningless mock vectors.
+EMBED_RETRIES = 4
+EMBED_RETRY_SECONDS = 25
+
 def _collection_exists() -> bool:
     return any(c.name == COLLECTION_NAME for c in get_client().get_collections().collections)
 
@@ -71,6 +88,19 @@ def initialize_collection():
         collection_name=COLLECTION_NAME,
         vectors_config=VectorParams(size=VECTOR_DIMENSION, distance=Distance.COSINE),
     )
+
+def _is_rate_limit(error: Exception) -> bool:
+    text = str(error).lower()
+    return "429" in text or "quota" in text or "rate limit" in text
+
+
+def _retry_delay(error: Exception) -> int:
+    """Use the provider's own retry_delay when it gives one, else a fixed wait."""
+    match = re.search(r"retry[_ ]delay\s*{?\s*seconds:?\s*(\d+)", str(error), re.IGNORECASE)
+    if not match:
+        match = re.search(r"retry in (\d+)", str(error), re.IGNORECASE)
+    return min(int(match.group(1)) + 2, 60) if match else EMBED_RETRY_SECONDS
+
 
 def embed_text(text: str, is_query: bool = False) -> list:
     api_key = settings.gemini_api_key
@@ -107,19 +137,35 @@ def embed_texts(texts: list, is_query: bool = False) -> list:
 
     genai.configure(api_key=api_key)
     task_type = "retrieval_query" if is_query else "retrieval_document"
-    try:
-        result = genai.embed_content(
-            model=EMBEDDING_MODEL,
-            content=texts,
-            task_type=task_type,
-            output_dimensionality=VECTOR_DIMENSION,
-        )
-        diagnostics.set_status("embeddings", "real", None)
-        return result["embedding"]
-    except Exception as e:
-        logger.warning(f"[embed_texts] batch embedding failed for {len(texts)} texts, using mock vectors: {e}")
-        diagnostics.set_status("embeddings", "mock", str(e))
-        return [[0.1] * VECTOR_DIMENSION] * len(texts)
+    trimmed = [t[:MAX_EMBED_CHARS] for t in texts]
+    vectors = []
+    for start in range(0, len(trimmed), EMBED_BATCH):
+        batch = trimmed[start:start + EMBED_BATCH]
+        batch_no = start // EMBED_BATCH + 1
+        for attempt in range(EMBED_RETRIES + 1):
+            try:
+                result = genai.embed_content(
+                    model=EMBEDDING_MODEL,
+                    content=batch,
+                    task_type=task_type,
+                    output_dimensionality=VECTOR_DIMENSION,
+                )
+                vectors.extend(result["embedding"])
+                break
+            except Exception as e:
+                if _is_rate_limit(e) and attempt < EMBED_RETRIES:
+                    delay = _retry_delay(e)
+                    logger.warning(f"[embed_texts] batch {batch_no} hit the embedding rate limit; waiting {delay}s and retrying (attempt {attempt + 1}/{EMBED_RETRIES})")
+                    time.sleep(delay)
+                    continue
+                # Only this batch degrades; the rest of the catalog still gets real vectors.
+                logger.warning(f"[embed_texts] batch {batch_no} failed for {len(batch)} texts, using mock vectors: {e}")
+                diagnostics.set_status("embeddings", "mock", str(e))
+                vectors.extend([[0.1] * VECTOR_DIMENSION] * len(batch))
+                break
+        if diagnostics.get_status("embeddings")["mode"] != "mock":
+            diagnostics.set_status("embeddings", "real", None)
+    return vectors
 
 def ingest_pdf(pdf_bytes: bytes, job_id: str = "unknown", filename: str = "catalog.pdf") -> dict:
     content_hash = hashlib.sha256(pdf_bytes).hexdigest()
@@ -169,6 +215,10 @@ def ingest_pdf(pdf_bytes: bytes, job_id: str = "unknown", filename: str = "catal
         image_entries = []
         try:
             for img_idx, img_file in enumerate(page.images):
+                if len(image_entries) >= MAX_IMAGES_PER_PAGE:
+                    break
+                if len(img_file.data) < MIN_IMAGE_BYTES:
+                    continue  # icons/logos are never the hero image
                 img_ext = os.path.splitext(img_file.name)[1] if img_file.name else ".png"
                 if not img_ext or img_ext == ".":
                     img_ext = ".png"

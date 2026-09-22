@@ -8,6 +8,52 @@ Open items that have been identified but not yet done live in [Backlog](#backlog
 
 ---
 
+## 2026-09-23 — Large catalogs: batching, rate-limit retries, token accounting
+
+### Large PDFs were quietly unusable
+- **Problem:** A 38 MB / several-hundred-page catalog hit three separate walls. The upload
+  limit was hard-coded at 15 MB. Every page was embedded in **one** API request, which fails
+  outright for a large catalog and dropped the whole index to mock vectors. And every image of
+  every page was written to disk, though only one hero image per page is ever used.
+- **Fix:**
+  - `MAX_UPLOAD_MB` setting, default 50 (was a hard-coded 15 MB).
+  - Pages are embedded in batches of 50, each page trimmed to 8000 chars. A failing batch
+    degrades only itself.
+  - **Rate-limit retries.** Gemini's free embedding quota is 100 requests per minute and counts
+    one request per text, so a large catalog *will* hit it mid-ingest. A rate-limited batch now
+    waits (using the provider's own `retry_delay` when given, capped at 60 s) and retries up to
+    4 times, instead of silently filling those pages with mock vectors - which would make
+    retrieval return near-random pages for the rest of the catalog's life.
+  - Image extraction keeps at most 2 images per page and skips anything under 4 KB.
+- **Files:** `app/rag/search.py`, `app/config.py`, `app/main.py`, `static/index.html`,
+  `tests/test_catalog.py`
+- **Verified:** 44 tests, 3 new: batch sizes and per-page trimming over 120 pages, a
+  non-retryable failure degrading only its own batch, and a rate-limited batch waiting the
+  provider's `retry_delay` then succeeding with real vectors.
+
+### Token accounting, and where the time and tokens actually go
+- `invoke_structured` records input/output tokens per purpose (`diagnostics.add_tokens`), and
+  the benchmark reports them per phase. New `scripts/make_sample_catalog.py` generates a
+  realistic multi-page catalog PDF, so ingest/retrieval/**extraction** can be benchmarked
+  without a real (confidential) catalog. `--catalog PDF` runs the benchmark against it.
+- Measured on a generated 120-page catalog (2 runs, median), `gemini-3.1-flash-lite`:
+
+| phase | time | tokens in / out |
+|---|---|---|
+| recommend (search + extract + rank) | 19.5 s | extractor 1035/403, ranker 854/293 |
+| copy (write + review) | 18.4 s | writer 673/256, critic 567/78, evaluator 413/48 |
+| plan | 6.2 s | 270/277 |
+| profile | 4.6 s | 208/25 |
+| pdf | 5.9 s | - |
+| **total** | **54.6 s** | **~4.0k in / 1.4k out per run** |
+
+  **Tokens are not the constraint - latency is.** A whole run is ~5.4k tokens; the cost of a
+  run is round-trip time, not token spend. Extraction is the largest prompt but scales with the
+  number of *matched* pages (6), not catalog size. The evaluator was the slowest reviewer here
+  (11.5 s vs the critic's 6.5 s), and its score never affects the approve/revise decision.
+
+---
+
 ## 2026-09-23 — Backup LLM provider; Gemini as primary; 27% faster overall
 
 ### One call path, with an automatic backup provider
@@ -418,6 +464,9 @@ Identified but not yet done. Ordered roughly by priority.
 - **Thin personalisation.** The brochure says "Prepared for: Valued Customer", because the form
   collects no name.
 - **Scanned PDFs yield nothing.** No OCR, so image-only catalogs just produce a warning.
+- **Ingesting a large catalog is slow on free embeddings** (100 requests/minute, one per page),
+  so ~100 pages per minute of waiting. One-time per catalog, but a 400-page catalog is a ~4
+  minute ingest. A paid tier or a local embedding model removes this.
 - **Dependencies.** `google.generativeai` (embeddings) is deprecated; move to `google-genai`.
   Qdrant `recreate_collection` / `search` are deprecated.
 - **Leftovers:** empty `frontend-nextjs/`. The service directory is still named

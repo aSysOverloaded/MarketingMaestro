@@ -48,3 +48,27 @@ def set_ingest_meta(meta: Dict[str, Any]) -> None:
 def get_ingest_meta() -> Optional[Dict[str, Any]]:
     with _lock:
         return dict(_ingest_meta) if _ingest_meta else None
+
+
+# --- Token accounting -------------------------------------------------------------------
+# Cumulative per purpose (planner, writer, ...) since the last reset, so a benchmark can
+# attribute token spend to pipeline phases. Reset per run; not persisted.
+_tokens: Dict[str, Dict[str, int]] = {}
+
+
+def add_tokens(purpose: str, input_tokens: int, output_tokens: int) -> None:
+    with _lock:
+        entry = _tokens.setdefault(purpose, {"calls": 0, "input": 0, "output": 0})
+        entry["calls"] += 1
+        entry["input"] += input_tokens
+        entry["output"] += output_tokens
+
+
+def get_tokens() -> Dict[str, Dict[str, int]]:
+    with _lock:
+        return {k: dict(v) for k, v in _tokens.items()}
+
+
+def reset_tokens() -> None:
+    with _lock:
+        _tokens.clear()

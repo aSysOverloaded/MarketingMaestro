@@ -56,6 +56,9 @@ def _invoke_once(purpose: str, prompt: ChatPromptTemplate, schema: Type[T], inpu
     result = chain.invoke(inputs)
     if result["parsing_error"] or result["parsed"] is None:
         raise RuntimeError(f"structured output failed: {result['parsing_error']}")
+    usage = getattr(result["raw"], "usage_metadata", None) or {}
+    if usage:
+        diagnostics.add_tokens(purpose, usage.get("input_tokens", 0), usage.get("output_tokens", 0))
     return result["parsed"]
 
 

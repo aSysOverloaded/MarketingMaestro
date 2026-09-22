@@ -25,7 +25,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger("main")
 
-MAX_UPLOAD_BYTES = 15 * 1024 * 1024
 # uuid4 hex, not a timestamp: job ids gate access to the generated PDF (download and
 # /api/send-email), so they must not be guessable.
 JOB_ID_PATTERN = re.compile(r"^job_[0-9a-f]{32}$")
@@ -75,9 +74,10 @@ def recommend(
     # Read the upload inside the request - the file handle is closed once the response is sent.
     upload = None
     if brochure is not None and brochure.filename:
-        pdf_bytes = brochure.file.read(MAX_UPLOAD_BYTES + 1)
-        if len(pdf_bytes) > MAX_UPLOAD_BYTES:
-            raise HTTPException(status_code=413, detail="Brochure PDF exceeds the 15 MB limit.")
+        max_bytes = settings.max_upload_mb * 1024 * 1024
+        pdf_bytes = brochure.file.read(max_bytes + 1)
+        if len(pdf_bytes) > max_bytes:
+            raise HTTPException(status_code=413, detail=f"Brochure PDF exceeds the {settings.max_upload_mb} MB limit.")
         upload = (pdf_bytes, brochure.filename)
 
     workflow = build_workflow()

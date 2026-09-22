@@ -57,6 +57,11 @@ class Settings(BaseSettings):
     smtp_user: str = ""
     smtp_pass: str = ""
 
+    # Largest catalog PDF accepted by /api/recommend. Ingest time and embedding quota scale
+    # with page count, not file size, so a big-but-scanned PDF is cheap and a big text-heavy
+    # one is not.
+    max_upload_mb: int = 50
+
     # Skip PDF rendering entirely (e.g. no Chromium available). The response then carries
     # pdf_url = null plus a warning - there is no mock PDF.
     disable_pdf: bool = False

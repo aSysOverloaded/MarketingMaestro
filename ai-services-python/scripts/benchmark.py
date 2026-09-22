@@ -20,6 +20,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
+from app import diagnostics
 from app.ai.grounding import find_ungrounded_terms
 from app.catalog import CustomerInput
 from app.config import settings
@@ -32,8 +33,10 @@ PROFILES = [
 ]
 
 
-def run_once(customer: CustomerInput) -> dict:
-    ctx = brochure.JobContext(job_id=f"job_{uuid.uuid4().hex}", trace_id="trace_bench", customer=customer)
+def run_once(customer: CustomerInput, use_catalog: bool = False) -> dict:
+    diagnostics.reset_tokens()
+    ctx = brochure.JobContext(job_id=f"job_{uuid.uuid4().hex}", trace_id="trace_bench", customer=customer,
+                              catalog_indexed=use_catalog)
     steps = {}
     start = time.monotonic()
     error = None
@@ -50,6 +53,7 @@ def run_once(customer: CustomerInput) -> dict:
         "total_ms": total_ms,
         "steps_ms": steps,
         "calls": ctx.review.get("calls", []),
+        "tokens": diagnostics.get_tokens(),
         "revisions": ctx.review.get("revisions"),
         "critic_passed": (ctx.review.get("critic") or {}).get("passed"),
         "generic_copy": final_copy == brochure.fallback_copy(ctx.profile.segment) if ctx.profile else None,
@@ -75,6 +79,14 @@ def summarize(label: str, runs: list) -> dict:
         "steps_ms": {s: med([r["steps_ms"].get(s) for r in runs]) for s in step_names},
         "calls_ms": {c: med([x["ms"] for r in runs for x in r["calls"] if x["call"] == c]) for c in call_names},
         "calls_per_run": {c: round(sum(1 for r in runs for x in r["calls"] if x["call"] == c) / len(runs), 1) for c in call_names},
+        "tokens": {
+            purpose: {
+                "calls": round(statistics.mean([r["tokens"].get(purpose, {}).get("calls", 0) for r in runs]), 1),
+                "input": int(statistics.median([r["tokens"].get(purpose, {}).get("input", 0) for r in runs])),
+                "output": int(statistics.median([r["tokens"].get(purpose, {}).get("output", 0) for r in runs])),
+            }
+            for purpose in sorted({p for r in runs for p in r["tokens"]})
+        },
         "avg_revisions": round(statistics.mean([r["revisions"] or 0 for r in runs]), 2),
         "runs_with_generic_copy": sum(1 for r in runs if r["generic_copy"]),
         "runs_with_fallbacks": sum(1 for r in runs if r["fallback_warnings"]),
@@ -93,6 +105,10 @@ def print_table(summaries: list) -> None:
     for call in summaries[0]["calls_ms"]:
         rows.append((f"  call {call} (median)", [fmt_ms(s["calls_ms"].get(call)) for s in summaries]))
         rows.append((f"  call {call} (per run)", [str(s["calls_per_run"].get(call)) for s in summaries]))
+    for purpose, t in summaries[0].get("tokens", {}).items():
+        rows.append((f"  tokens {purpose} (in/out)", [
+            f"{s.get('tokens', {}).get(purpose, {}).get('input', 0)}/{s.get('tokens', {}).get(purpose, {}).get('output', 0)}"
+            for s in summaries]))
     for key in ["avg_revisions", "runs_with_generic_copy", "runs_with_fallbacks", "runs_with_ungrounded_final_copy", "errors"]:
         rows.append((key, [str(s[key]) for s in summaries]))
 
@@ -108,6 +124,7 @@ def main() -> None:
     parser.add_argument("--label", default="run")
     parser.add_argument("--runs", type=int, default=3, help="runs in total, cycling through the fixed profiles")
     parser.add_argument("--no-pdf", action="store_true", help="skip PDF rendering (it is not an LLM cost)")
+    parser.add_argument("--catalog", metavar="PDF", help="ingest this catalog first and run against it (default: built-in demo catalog)")
     parser.add_argument("--compare", nargs="+", metavar="RESULT_JSON", help="print saved results side by side")
     args = parser.parse_args()
 
@@ -119,15 +136,26 @@ def main() -> None:
         settings.disable_pdf = True
     print(f"model={settings.llm_model} critic_model={settings.llm_critic_model or '(same)'} runs={args.runs}", flush=True)
 
+    use_catalog = False
+    if args.catalog:
+        from app.rag.search import ingest_pdf
+        pdf_bytes = Path(args.catalog).read_bytes()
+        start = time.monotonic()
+        result = ingest_pdf(pdf_bytes, job_id="job_bench", filename=Path(args.catalog).name)
+        use_catalog = result["indexed_pages"] > 0
+        print(f"ingested {args.catalog}: {result['indexed_pages']} pages, reused={result.get('reused')}, "
+              f"{time.monotonic() - start:.1f}s, embeddings={diagnostics.get_status('embeddings')['mode']}", flush=True)
+
     runs = []
     for i in range(args.runs):
         customer = PROFILES[i % len(PROFILES)]
-        result = run_once(customer)
+        result = run_once(customer, use_catalog=use_catalog)
         runs.append(result)
         print(f"run {i + 1}/{args.runs}: {result['total_ms'] / 1000:.1f}s revisions={result['revisions']} "
               f"generic_copy={result['generic_copy']} ungrounded={result['ungrounded_in_final']} error={result['error']}", flush=True)
 
     summary = summarize(args.label, runs)
+    summary["catalog"] = Path(args.catalog).name if args.catalog else "demo"
     out_dir = settings.storage_dir / "benchmarks"
     out_dir.mkdir(parents=True, exist_ok=True)
     out = out_dir / f"{args.label}-{datetime.now():%Y%m%d-%H%M%S}.json"
