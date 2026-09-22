@@ -8,6 +8,58 @@ Open items that have been identified but not yet done live in [Backlog](#backlog
 
 ---
 
+## 2026-09-23 — Catalog brand, product-block filtering, interest coverage, safe re-ingest
+
+### Brand comes from the catalog, not from guessing product names
+Brand styling was derived from a product's model name, which only recognised the two appliance
+brands hard-coded for the demo catalog - so a real Macron sports catalogue produced brochures
+branded "Premium Home". `app/ai/catalog_brand.py` now identifies the brand once per catalog at
+ingest (one LLM call) and stores it with the catalog; on the real catalogue it returns
+**Macron**. An empty or over-long name is rejected, a non-hex colour is dropped, and a failure
+never costs the catalog its ingest - the brochure just falls back to the old behaviour.
+
+### Non-product blocks are no longer indexed
+Only 433 of 644 blocks in the real catalogue state a price or product code; the rest are
+covers, index pages and brand stories that cost an embedding request each and compete in
+search (a live run matched the cover page). Blocks without a price or code are now dropped -
+**441 of 644 kept** - unless fewer than 30% of blocks look like products, in which case the
+catalog simply does not print prices and everything is kept.
+
+### Every stated interest gets a product
+A customer asking for "basketball, running" got three basketballs: retrieval searches per
+hobby, but ranking then picks the best overall. Retrieval now records which interest found each
+block, and `_cover_every_hobby` swaps in the best product for any interest ranking left out,
+with deterministic grounded reasons. Reported as `copy_review.hobby_coverage_added`.
+
+### Ingest is versioned, and no longer destroys a working catalog
+Two flaws found by running this for real:
+
+- **Reuse ignored the code.** The indexed catalog was reused whenever the PDF's hash matched,
+  so a catalog indexed by the *old* chunking was served forever and the only fix was a manual
+  rebuild. `INGEST_VERSION` is now stored with the catalog and included in the reuse check;
+  bump it whenever ingest output changes, and the next upload re-indexes itself. Re-indexing
+  also clears the extraction cache, whose chunk ids describe the previous build.
+- **A failed ingest left no catalog at all.** Ingest deleted every existing collection up
+  front, so when the embedding quota ran out half way through, the previously working catalog
+  was already gone. Ingest now writes into its own collection, switches the catalog over only
+  once chunks are actually indexed, and drops older collections afterwards. An ingest that
+  indexes nothing returns `success: False` and leaves the current catalog untouched.
+- **Daily quota is no longer retried.** A per-minute cap clears in a minute and is worth
+  waiting for; Gemini's free tier also has a **1000 embeddings/day** cap, which does not clear
+  today, so it now fails fast and is reported instead of waiting 4×60 s per batch.
+
+- **Files:** `app/ai/catalog_brand.py` (new), `app/rag/search.py`, `app/render/brochure.py`,
+  `app/pipeline/brochure.py`, tests
+- **Verified:** 72 tests, 10 new (brand accepted/rejected/failed, product-block filtering and
+  the no-prices case, interest coverage and the single-interest no-op, ingest version reuse and
+  invalidation, cache cleared on re-index, failed ingest keeping the previous catalog, daily cap
+  not retried). Live: brand detection returned "Macron"; filtering kept 441 of 644 blocks.
+- **Not verified live:** the re-ingest with filtering + brand hit the **daily** embedding cap
+  part-way (1085 embeddings had already been spent today), so the real catalogue currently has
+  no index and must be re-uploaded once the quota resets.
+
+---
+
 ## 2026-09-23 — Layout-aware chunking, per-product images, extraction caching
 
 The three items the real catalogue diagnosis called for.
@@ -569,6 +621,8 @@ Identified but not yet done. Ordered roughly by priority.
 > named extracted images, publicly served `/storage`) is acceptable under this assumption, so
 > multi-user items are out of scope rather than backlog.
 
+- **Free embedding quota is 1000/day**, and a 133-page catalogue is ~441 requests, so two
+  re-indexes in a day exhaust it. A paid tier or a local embedding model removes this.
 - **Ingest is slower and costs more embedding requests now**: one request per block (644 for a
   133-page catalogue) instead of per page, plus ~0.8 s/page for layout parsing and rendering.
   One-off per catalog, but worth revisiting if quota is tight (e.g. skip colour-swatch blocks).

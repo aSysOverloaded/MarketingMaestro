@@ -62,6 +62,19 @@ def brand_for_model(model: str) -> Brand:
     return DEFAULT_BRAND
 
 
+def brand_from_catalog(catalog_brand: Optional[dict]) -> Optional[Brand]:
+    """The brand detected from the catalog at ingest, if any.
+
+    This beats guessing from a product's model name, which only recognises the brands hard-coded
+    above - a real Macron sports catalogue was branded "Premium Home" until this existed.
+    """
+    if not catalog_brand or not (catalog_brand.get("name") or "").strip():
+        return None
+    name = catalog_brand["name"].strip()
+    primary = catalog_brand.get("primary_color") or DEFAULT_BRAND.primary_color
+    return Brand(name=name, primary_color=primary, secondary_color=DEFAULT_BRAND.secondary_color, initial=name[0].upper())
+
+
 def hero_image_for(product: Product) -> Optional[str]:
     """The product's own photo, a clearly-matching stock photo, or nothing at all.
 
@@ -111,13 +124,15 @@ def compile_html(
     recommendations: List[Recommendation],
     products: List[Product],
     output_dir: Path,
+    catalog_brand: Optional[dict] = None,
 ) -> Path:
+    catalog = brand_from_catalog(catalog_brand)
     by_id = {p.id: p for p in products}
     items = []
     for rec in recommendations:
         product = by_id[rec.product_id]
         items.append({
-            "brand": brand_for_model(product.model),
+            "brand": catalog or brand_for_model(product.model),
             "product": {
                 "model": product.model,
                 "price": _price(product),

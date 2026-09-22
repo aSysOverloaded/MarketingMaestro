@@ -17,6 +17,7 @@ import google.generativeai as genai
 
 from app import diagnostics
 from app.config import settings
+from app.ai.catalog_brand import detect_catalog_brand
 from app.rag import extraction_cache
 from app.rag.layout import segment_words
 from app.observability import log_stage
@@ -29,6 +30,17 @@ logger = logging.getLogger("rag")
 # for the new one (884 points indexed for a 644-chunk catalogue). A fresh name per catalog
 # sidesteps that entirely; the old collection is deleted too, for tidiness.
 COLLECTION_PREFIX = "catalog_"
+
+# What an index built by *this* code looks like. An indexed catalog is only reused when it was
+# built by the same version, so changing how ingest works re-indexes on the next upload instead
+# of quietly serving an index built by the old rules.
+#
+# Bump this whenever ingest output changes: chunking or segmentation, block filtering, the
+# stored payload, embedding model or dimensions, image selection, brand detection.
+#   1: one chunk per page
+#   2: layout-aware product blocks, per-block images
+#   3: non-product blocks filtered out, catalog brand detected
+INGEST_VERSION = 3
 
 
 def collection_for(catalog_sha: str) -> str:
@@ -123,19 +135,37 @@ def clear_catalog() -> None:
 
 
 def initialize_collection(name: str) -> None:
-    """Create an empty collection for this catalog, dropping every older catalog's."""
+    """Create an empty collection for this catalog, leaving any other catalog's alone.
+
+    Only this one is touched: an ingest that fails half way (the embedding quota runs out, the
+    process is killed) must not take the previously working catalog with it. Older collections
+    are dropped by drop_other_collections() once the new one is indexed and recorded.
+    """
     client = get_client()
-    for existing in client.get_collections().collections:
-        if existing.name.startswith(COLLECTION_PREFIX):
-            client.delete_collection(collection_name=existing.name)
+    if _collection_exists(name):
+        client.delete_collection(collection_name=name)
     client.create_collection(
         collection_name=name,
         vectors_config=VectorParams(size=VECTOR_DIMENSION, distance=Distance.COSINE),
     )
 
+
+def drop_other_collections(keep: str) -> None:
+    client = get_client()
+    for existing in client.get_collections().collections:
+        if existing.name.startswith(COLLECTION_PREFIX) and existing.name != keep:
+            client.delete_collection(collection_name=existing.name)
+
 def _is_rate_limit(error: Exception) -> bool:
     text = str(error).lower()
     return "429" in text or "quota" in text or "rate limit" in text
+
+
+def _is_daily_cap(error: Exception) -> bool:
+    """A per-minute cap clears in a minute; a per-day cap does not clear today, so retrying it
+    just burns minutes before failing anyway."""
+    text = str(error).lower()
+    return "perday" in text.replace(" ", "") or "per day" in text or "requestsperday" in text.replace("_", "")
 
 
 def _retry_delay(error: Exception) -> int:
@@ -203,6 +233,11 @@ def embed_texts(texts: list, is_query: bool = False) -> list:
                 vectors.extend(result["embedding"])
                 break
             except Exception as e:
+                if _is_daily_cap(e):
+                    logger.error(f"[embed_texts] daily embedding quota reached; the rest of this catalog cannot be indexed today: {e}")
+                    diagnostics.set_status("embeddings", "mock", f"daily quota reached: {e}")
+                    vectors.extend([[0.1] * VECTOR_DIMENSION] * len(batch))
+                    break
                 if _is_rate_limit(e) and attempt < EMBED_RETRIES:
                     delay = _retry_delay(e)
                     logger.warning(f"[embed_texts] batch {batch_no} hit the embedding rate limit; waiting {delay}s and retrying (attempt {attempt + 1}/{EMBED_RETRIES})")
@@ -371,13 +406,40 @@ def chunk_pdf_by_page(pdf_bytes: bytes, dest_dir: str, job_id: str) -> tuple:
     return chunks, stats
 
 
+# Catalogs carry front matter: covers, index pages, brand stories, campus photos. They are not
+# products, but they cost an embedding request each and compete in search (a run actually
+# matched the cover page). A block is taken to be a product when it states a price or a long
+# product code.
+_PRICE = re.compile(r"(?:UVP|EUR|USD|GBP|INR|[€$£₹])\s?\d+[.,]?\d*", re.IGNORECASE)
+_PRODUCT_CODE = re.compile(r"(?<!\d)\d{6,9}(?!\d)")
+# Below this share, the catalog simply does not print prices or codes, and filtering would
+# throw the whole catalog away - so everything is kept.
+MIN_PRODUCT_BLOCK_SHARE = 0.3
+
+
+def looks_like_product(text: str) -> bool:
+    return bool(_PRICE.search(text) or _PRODUCT_CODE.search(text))
+
+
+def filter_product_blocks(chunks: list, job_id: str = "unknown") -> list:
+    """Keep only product blocks - unless too few blocks look like products to judge."""
+    product_chunks = [c for c in chunks if looks_like_product(c["content"])]
+    if not chunks or len(product_chunks) / len(chunks) < MIN_PRODUCT_BLOCK_SHARE:
+        return chunks
+    log_stage(logger, job_id, "ingest",
+              f"keeping {len(product_chunks)} product block(s), dropping {len(chunks) - len(product_chunks)} "
+              f"non-product block(s) (covers, index, brand pages)")
+    return product_chunks
+
+
 def ingest_pdf(pdf_bytes: bytes, job_id: str = "unknown", filename: str = "catalog.pdf") -> dict:
     content_hash = hashlib.sha256(pdf_bytes).hexdigest()
 
     # Re-uploading byte-identical content skips re-embedding (saves Gemini quota) - unless the
     # stored vectors were mock ones from a run without a working key, which are worth replacing.
     current = get_catalog()
-    if current and current["sha256"] == content_hash and current.get("embeddings") == "real":
+    if (current and current["sha256"] == content_hash and current.get("embeddings") == "real"
+            and current.get("ingest_version") == INGEST_VERSION):
         log_stage(logger, job_id, "ingest", f"content hash matches currently indexed catalog ({content_hash[:12]}...), skipping re-embed")
         return {"success": True, "indexed_pages": current["indexed_pages"],
                 "indexed_chunks": current.get("indexed_chunks", current["indexed_pages"]),
@@ -414,6 +476,8 @@ def ingest_pdf(pdf_bytes: bytes, job_id: str = "unknown", filename: str = "catal
             chunk["content"] = strip_boilerplate(chunk["content"], boilerplate)
         chunks = [c for c in chunks if len(c["content"]) >= MIN_CHUNK_CHARS]
 
+    chunks = filter_product_blocks(chunks, job_id)
+
     # 3. Embed every chunk (in batches), then index it
     points = []
     if chunks:
@@ -429,6 +493,12 @@ def ingest_pdf(pdf_bytes: bytes, job_id: str = "unknown", filename: str = "catal
             wait=True,
             points=points
         )
+
+    # One LLM call per catalog: brand styling belongs to the catalog, not to each product name.
+    sample = "\n\n".join(c["content"] for c in chunks[:8])
+    brand = detect_catalog_brand(sample, job_id) if chunks else None
+    if brand:
+        log_stage(logger, job_id, "ingest", f"catalog brand detected: {brand['name']}")
 
     indexed_count = stats["pages_with_text"]
     duration_ms = int((time.monotonic() - start) * 1000)
@@ -447,15 +517,31 @@ def ingest_pdf(pdf_bytes: bytes, job_id: str = "unknown", filename: str = "catal
         f"image_failures={stats['image_failures']} duration_ms={duration_ms}"
     )
 
+    if not points:
+        # Nothing indexed (no usable text, or the quota ran out before the first batch): leave
+        # whatever catalog was in use alone rather than replacing it with an empty index.
+        log_stage(logger, job_id, "ingest", "no chunks indexed; keeping the previous catalog", level="warning")
+        get_client().delete_collection(collection_name=collection)
+        return {"success": False, "indexed_pages": 0, "indexed_chunks": 0,
+                "collection_name": None, "reused": False}
+
+    # Chunk ids describe positions in the index just rebuilt, so anything cached against the
+    # previous build is meaningless now.
+    extraction_cache.clear(content_hash)
+
     _catalog_meta_path().write_text(json.dumps({
         "filename": filename,
         "sha256": content_hash,
         "collection": collection,
+        "ingest_version": INGEST_VERSION,
+        "brand": brand,
         "indexed_pages": indexed_count,
         "indexed_chunks": len(chunks),
         "indexed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "embeddings": diagnostics.get_status("embeddings")["mode"],
     }), encoding="utf-8")
+
+    drop_other_collections(keep=collection)
 
     return {
         "success": True,

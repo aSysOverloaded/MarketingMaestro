@@ -184,3 +184,88 @@ def test_ingesting_a_new_catalog_drops_the_previous_one(monkeypatch):
     assert "Rhenium" in contents
     assert "Trail Tent" not in contents
     assert search.get_catalog()["filename"] == "second.pdf"
+
+
+def test_non_product_blocks_are_dropped_when_the_catalog_prices_things():
+    """Covers, index and brand-story pages cost an embedding request each and compete in
+    search (a real run matched the cover page)."""
+    chunks = [{"content": c} for c in [
+        "RHENIUM BASKETBALL BALL UVP 59,99", "PROMETIUM BALL 80000274 8 panels",
+        "NOBIUM PRO BALL EUR 98.99", "A SUCCESS STORY since the beginning we have designed",
+    ]]
+    kept = [c["content"] for c in search.filter_product_blocks(chunks)]
+    assert len(kept) == 3 and not any("SUCCESS STORY" in c for c in kept)
+
+
+def test_a_catalog_without_prices_or_codes_is_kept_whole():
+    chunks = [{"content": t} for t in ["Trail Tent, ripstop nylon", "Camp Stove, piezo ignition", "About our company"]]
+    assert len(search.filter_product_blocks(chunks)) == 3  # filtering would throw it all away
+
+
+def test_changing_how_ingest_works_reindexes_the_same_catalog(monkeypatch):
+    """Reuse must consider the code that built the index, not just the PDF's hash. Otherwise a
+    catalog indexed by older rules (page-sized chunks, unfiltered pages) is served forever."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "gemini_api_key", "")
+    assert not search.ingest_pdf(PDF, filename="c.pdf")["reused"]
+    assert search.get_catalog()["ingest_version"] == search.INGEST_VERSION
+    # same bytes, same ingest version: no work
+    meta = search._catalog_meta_path()
+    meta.write_text(meta.read_text().replace('"mock"', '"real"'))
+    assert search.ingest_pdf(PDF, filename="c.pdf")["reused"]
+
+    # a newer ingest version invalidates it, with no user action
+    monkeypatch.setattr(search, "INGEST_VERSION", search.INGEST_VERSION + 1)
+    assert not search.ingest_pdf(PDF, filename="c.pdf")["reused"]
+    assert search.get_catalog()["ingest_version"] == search.INGEST_VERSION
+
+
+def test_reindexing_drops_products_cached_against_the_old_chunks(monkeypatch):
+    from app.config import settings
+    from app.rag import extraction_cache
+
+    monkeypatch.setattr(settings, "gemini_api_key", "")
+    search.ingest_pdf(PDF, filename="c.pdf")
+    sha = search.get_catalog()["sha256"]
+    extraction_cache.put_many(sha, {"p1b0": [{"id": "old", "model": "From the old chunking"}]})
+
+    monkeypatch.setattr(search, "INGEST_VERSION", search.INGEST_VERSION + 1)
+    search.ingest_pdf(PDF, filename="c.pdf")
+    assert extraction_cache.get_many(sha, ["p1b0"]) == {}
+
+
+def test_a_failed_ingest_keeps_the_previous_catalog(monkeypatch):
+    """A half-finished ingest (quota gone, process killed) must not leave the app with no
+    catalog: the working one stays until the new index actually exists."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "gemini_api_key", "")
+    search.ingest_pdf(PDF, filename="good.pdf")
+    good = search.get_catalog()
+    assert good["filename"] == "good.pdf"
+
+    empty_pdf = _pdf("")  # nothing indexable
+    result = search.ingest_pdf(empty_pdf, filename="broken.pdf")
+    assert result["success"] is False and result["indexed_chunks"] == 0
+    assert search.get_catalog() == good, "the working catalog was replaced by a failed ingest"
+
+
+def test_a_daily_quota_is_not_retried(monkeypatch):
+    """A per-minute cap clears in a minute and is worth waiting for; a per-day cap is not."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "gemini_api_key", "test-key")
+    monkeypatch.setattr(search.genai, "configure", lambda **kw: None)
+    slept = []
+    monkeypatch.setattr(search.time, "sleep", slept.append)
+
+    def daily_cap(**kw):
+        raise RuntimeError('429 quota exceeded quota_id: "EmbedContentRequestsPerDayPerUserPerProjectPerModel-FreeTier"')
+
+    monkeypatch.setattr(search.genai, "embed_content", daily_cap)
+    vectors = search.embed_texts(["page one", "page two"])
+
+    assert slept == [], "waited on a quota that will not clear today"
+    assert vectors == [[0.1] * search.VECTOR_DIMENSION] * 2
+    assert "daily quota" in search.diagnostics.get_status("embeddings")["detail"]

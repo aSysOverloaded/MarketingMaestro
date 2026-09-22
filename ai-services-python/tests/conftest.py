@@ -8,13 +8,21 @@ def _offline(*_args, **_kwargs):
     raise RuntimeError("LLM offline (test)")
 
 
-@pytest.fixture
-def no_llm(monkeypatch):
-    """Every chat-model call fails, forcing each step onto its deterministic fallback.
-    One patch point covers every AI module, since they all go through invoke_structured."""
+@pytest.fixture(autouse=True)
+def never_call_a_real_provider(monkeypatch):
+    """No test may reach a real LLM: it would be slow, flaky and spend quota. One patch point
+    covers every AI module, since they all go through invoke_structured. Tests that want a
+    working chain stub the module function they care about (e.g. brochure.generate_copy)."""
     import app.ai.llm
 
     monkeypatch.setattr(app.ai.llm, "_invoke_once", _offline)
+
+
+@pytest.fixture
+def no_llm():
+    """Explicit marker for tests that are *about* the deterministic fallbacks. The patching
+    itself is autouse above; this keeps those tests readable."""
+    return None
 
 
 @pytest.fixture(autouse=True)

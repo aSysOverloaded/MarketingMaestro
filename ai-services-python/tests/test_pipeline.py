@@ -151,3 +151,40 @@ def test_ranker_reasons_with_unsupported_terms_are_removed(no_llm, monkeypatch):
     assert rec.explanation == brochure.SAFE_EXPLANATION
     assert {t for r in ctx.review["ranker_removed"] for t in r["terms"]} == {"SmartThings", "92", "NFC"}
     assert any("ranking reason" in w["message"] for w in ctx.warnings)
+
+
+def test_every_stated_interest_gets_a_product(no_llm, monkeypatch):
+    """Retrieval searches per hobby, but ranking picks the best overall, so a customer asking
+    for "basketball, running" could get only basketballs."""
+    from app.catalog import Product
+
+    customer = CUSTOMER.model_copy(update={"hobbies": ["basketball", "running"]})
+    balls = [Product(id=f"ball{i}", model=f"Ball {i}", base_price=50, features=["a", "b", "c"]) for i in range(4)]
+    shoe = Product(id="shoe", model="Running Shoe", base_price=80, features=["a", "b", "c"])
+
+    ctx = brochure.JobContext(job_id="job_" + "0" * 32, trace_id="t", customer=customer)
+    ctx.profile = brochure.rule_based_profile(customer, ctx.job_id)
+    ctx.product_hobbies = {**{b.id: {"basketball"} for b in balls}, "shoe": {"running"}}
+    # ranking returned four basketballs and no running product
+    ctx.recommendations = brochure.score_products(customer, balls, ctx.job_id)
+
+    brochure._cover_every_hobby(ctx, [*balls, shoe])
+    picked = {r.product_id for r in ctx.recommendations}
+    assert "shoe" in picked, "the running interest was left out"
+    assert len(ctx.recommendations) == 4  # still capped
+    assert ctx.review["hobby_coverage_added"] == [{"hobby": "running", "product_id": "shoe"}]
+
+
+def test_single_interest_runs_are_untouched(no_llm):
+    from app.catalog import Product
+
+    balls = [Product(id=f"ball{i}", model=f"Ball {i}", base_price=50) for i in range(2)]
+    ctx = brochure.JobContext(job_id="job_" + "0" * 32, trace_id="t", customer=CUSTOMER)
+    ctx.profile = brochure.rule_based_profile(CUSTOMER, ctx.job_id)
+    ctx.product_hobbies = {b.id: {"camping"} for b in balls}
+    ctx.recommendations = brochure.score_products(CUSTOMER, balls, ctx.job_id)
+    before = [r.product_id for r in ctx.recommendations]
+
+    brochure._cover_every_hobby(ctx, balls)
+    assert [r.product_id for r in ctx.recommendations] == before
+    assert "hobby_coverage_added" not in ctx.review

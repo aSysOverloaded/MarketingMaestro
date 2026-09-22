@@ -22,7 +22,7 @@ from app.ai.grounding import find_ungrounded_in_text, find_ungrounded_terms
 from app.ai.llm import used_fallback
 from app.ai.planner import generate_plan
 from app.ai.profile import classify_profile, rule_based_profile
-from app.ai.ranker import rank_products, score_products
+from app.ai.ranker import MAX_RECOMMENDATIONS, rank_products, score_products
 from app.ai.writer import generate_copy
 from app.catalog import DEFAULT_CATALOG, CustomerInput, Product, Recommendation, UserProfile
 from app.config import settings
@@ -76,6 +76,8 @@ class JobContext:
     html_path: Optional[Path] = None
     pdf_path: Optional[Path] = None
 
+    # product id -> the customer interests whose search found it
+    product_hobbies: Dict[str, set] = field(default_factory=dict)
     rag_debug: Dict[str, Any] = field(default_factory=lambda: {"active": False})
     warnings: List[Dict[str, str]] = field(default_factory=list)
     # Receives short human-readable progress notes ("Writing draft 2") for the UI.
@@ -178,11 +180,13 @@ def _retrieve_candidates(ctx: JobContext) -> List[Product]:
 
     ctx.note(f"Searching the catalog ({len(queries)} {'query' if len(queries) == 1 else 'queries'})")
     merged: Dict[str, dict] = {}
-    for query in queries:
+    for hobby, query in zip(hobbies, queries):
         for m in search_catalog(query, PER_HOBBY_LIMIT, job_id=ctx.job_id):
             chunk_id = m["chunk_id"]
             if chunk_id not in merged or m["score"] > merged[chunk_id]["score"]:
-                merged[chunk_id] = m
+                merged[chunk_id] = {**m, "hobbies": set()}
+            # Remember which interest found this block, so the brochure can cover each of them.
+            merged[chunk_id]["hobbies"].add(hobby)
 
     if diagnostics.get_status("embeddings")["mode"] == "mock":
         ctx.warn("recommend", "Embeddings unavailable (mock vectors) - catalog retrieval ranking is meaningless for this run.")
@@ -200,8 +204,10 @@ def _retrieve_candidates(ctx: JobContext) -> List[Product]:
     products = _extract_with_cache(ctx, matches)
     for product in products:
         chunk = _match_product_to_chunk(product, matches)
-        if chunk and chunk["images"]:
-            product.hero_image = chunk["images"][0]  # cropped from this product's own block
+        if chunk:
+            ctx.product_hobbies[product.id] = set(chunk.get("hobbies") or ())
+            if chunk["images"]:
+                product.hero_image = chunk["images"][0]  # cropped from this product's own block
     if not products:
         raise RuntimeError("no products described on the matched catalog sections")
     return products
@@ -230,8 +236,45 @@ def recommend_step(ctx: JobContext) -> None:
         ctx.warn("recommend", f"AI ranking unavailable ({e}); used rule-based scoring.")
 
     by_id = {p.id: p for p in candidates}
+    _cover_every_hobby(ctx, candidates)
     ctx.selected_products = [by_id[r.product_id] for r in ctx.recommendations]
     _ground_recommendations(ctx)
+
+
+def _cover_every_hobby(ctx: JobContext, candidates: List[Product]) -> None:
+    """Make sure each stated interest is represented, when the catalog has something for it.
+
+    Retrieval searches per hobby, but ranking then picks the best overall - so a customer who
+    said "basketball, running" could get four basketballs and nothing for running.
+    """
+    hobbies = {h for hs in ctx.product_hobbies.values() for h in hs}
+    if len(hobbies) < 2:
+        return
+
+    def hobbies_of(product_id: str) -> set:
+        return ctx.product_hobbies.get(product_id, set())
+
+    covered = {h for r in ctx.recommendations for h in hobbies_of(r.product_id)}
+    by_id = {p.id: p for p in candidates}
+    for hobby in sorted(hobbies - covered):
+        pick = next((p for p in candidates if hobby in hobbies_of(p.id) and p.id not in {r.product_id for r in ctx.recommendations}), None)
+        if pick is None:
+            continue
+        # Deterministic reasons, so a swapped-in product is described as accurately as a ranked one.
+        scored = score_products(ctx.customer, [pick], ctx.job_id)[0]
+        scored.recommendation_id = f"rec_{ctx.job_id}_{hobby}"
+        if len(ctx.recommendations) < MAX_RECOMMENDATIONS:
+            ctx.recommendations.append(scored)
+        else:
+            # Drop the lowest-ranked product whose interests are already covered twice.
+            droppable = [r for r in ctx.recommendations
+                         if any(sum(1 for x in ctx.recommendations if h in hobbies_of(x.product_id)) > 1
+                                for h in hobbies_of(r.product_id))]
+            if not droppable:
+                continue
+            ctx.recommendations[ctx.recommendations.index(droppable[-1])] = scored
+        ctx.review.setdefault("hobby_coverage_added", []).append({"hobby": hobby, "product_id": pick.id})
+        log_stage(logger, ctx.job_id, "recommend", f"added a product for '{hobby}', which ranking had left out")
 
 
 # Replaces a ranker explanation that fails the grounding check. Customer-facing.
@@ -402,6 +445,7 @@ def html_step(ctx: JobContext) -> None:
         recommendations=ctx.recommendations,
         products=ctx.selected_products,
         output_dir=settings.storage_dir / "temp_brochures",
+        catalog_brand=(get_catalog() or {}).get("brand"),
     )
 
 

@@ -112,3 +112,34 @@ def test_grounding_short_terms_need_a_whole_word_match():
     assert find_ungrounded_terms({"paragraphs": ["Smart AI cooling."]}, FRIDGE) == ["AI"]
     washer = DEFAULT_CATALOG[1].model_dump()  # features include "AI DD Smart Fabric Care"
     assert find_ungrounded_terms({"paragraphs": ["AI DD fabric care."]}, washer) == []
+
+
+def test_catalog_brand_beats_guessing_from_the_model_name():
+    """A real Macron sports catalogue was branded "Premium Home" while branding was guessed
+    from product names."""
+    from app.render.brochure import brand_for_model, brand_from_catalog
+
+    assert brand_for_model("RHENIUM BASKETBALL BALL").name == "Premium Home"  # nothing to go on
+
+    brand = brand_from_catalog({"name": "Macron", "primary_color": "#e2001a"})
+    assert (brand.name, brand.primary_color, brand.initial) == ("Macron", "#e2001a", "M")
+
+    no_colour = brand_from_catalog({"name": "Macron", "primary_color": ""})
+    assert no_colour.primary_color == "#1e3a8a"  # falls back to the default palette
+    assert brand_from_catalog({"name": "  "}) is None and brand_from_catalog(None) is None
+
+
+def test_detected_brand_is_rejected_when_the_model_invents_one(monkeypatch):
+    import app.ai.catalog_brand as cb
+
+    monkeypatch.setattr(cb, "invoke_structured", lambda *a, **k: cb.CatalogBrandOutput(name="", primary_color="#fff"))
+    assert cb.detect_catalog_brand("some catalog text", "j") is None
+
+    monkeypatch.setattr(cb, "invoke_structured", lambda *a, **k: cb.CatalogBrandOutput(name="Macron", primary_color="reddish"))
+    assert cb.detect_catalog_brand("x", "j") == {"name": "Macron", "primary_color": ""}  # not a hex colour
+
+    def boom(*a, **k):
+        raise RuntimeError("provider down")
+
+    monkeypatch.setattr(cb, "invoke_structured", boom)
+    assert cb.detect_catalog_brand("x", "j") is None  # never costs the catalog its ingest
