@@ -202,6 +202,16 @@ style issue.
 
 Identified but not yet done. Ordered roughly by priority.
 
+> **Scope (decided 2026-09-22): single user.** The app is used by one person at a time, and
+> concurrent use is not supported. Shared in-process state (one Qdrant collection, globally
+> named extracted images, publicly served `/storage`) is acceptable under this assumption, so
+> multi-user items are out of scope rather than backlog.
+
+- **An uploaded catalog is forgotten on the next run.** `catalog_indexed` is only set when the
+  request includes a PDF, so a second run without re-uploading silently uses the demo catalog,
+  even though the index still holds the uploaded one. The index is also in-memory
+  (`QdrantClient(":memory:")`), so every server restart means re-uploading and re-embedding.
+  Reuse the current index when no file is sent, and persist it with `QdrantClient(path=...)`.
 - **The free model is often overloaded.** OpenRouter's free Nvidia provider returned `503
   provider overloaded` for most calls in several runs, so the brochure fell back to generic
   copy. The fallbacks work and are reported, but in practice the product needs a paid or
@@ -209,17 +219,28 @@ Identified but not yet done. Ordered roughly by priority.
 - **Generic invented claims still rely on the LLM critic.** The grounding check catches
   branded names, acronyms and numbers. Plain-language additions like "get alerts on your
   phone" still depend on the critic.
+- **Ranker explanations aren't fact-checked.** Only the cover copy goes through the grounding
+  check and critic. The per-product "Why this option fits your profile" explanation and matched
+  rules come straight from the ranker and are printed in the brochure. Run
+  `find_ungrounded_terms` on them against each product's specs.
 - **Critic and writer only see the top product**, while the brochure shows up to 4.
-- **Shared global state.** One in-memory Qdrant collection, recreated on every upload, and
-  globally named extracted images (`page_N_img_M`). Concurrent users overwrite each other's
-  catalogs and images, including images in brochures already generated. Scope the collection
-  and image names per job, or per catalog hash.
+- **The UI's progress messages are fake.** `setTimeout` timers switch the text at 3.5 s and
+  7.5 s whatever the pipeline is actually doing, while real runs take 30–120 s. Stream real
+  step progress (Server-Sent Events from the workflow runner).
 - **Slow on the free model.** The copy step is about 30 s per writer call, and each revision
-  costs another writer + critic round. Consider a faster model for the writer, or streaming
-  progress to the UI instead of one long request.
-- **`/storage` is fully public.** Job ids are no longer guessable, but extracted images use
-  predictable names. Serve generated files through a job-id-checked route instead.
-- **No cancellation.** When the browser disconnects, the pipeline keeps running to completion.
+  costs another writer + critic round. Consider a faster model for the writer.
+- **Branding only knows Samsung and LG.** Any uploaded catalog gets the "Premium Home" default,
+  and the cover uses the top product's brand even when the options have mixed brands. Have the
+  extractor return the brand, and use neutral cover branding for mixed selections.
+- **PDF rendering depends on the network.** Tailwind (CDN), Google Fonts and the Unsplash
+  fallback images load at render time: slow (`networkidle`) and broken offline. Ship compiled
+  CSS and fonts locally.
+- **No quality measurement.** There is no fixed set of sample catalogs and profiles for
+  measuring fallback rate, grounding violations or critic rejections across prompt and model
+  changes. Every quality claim so far comes from one-off manual runs.
+- **Thin personalisation.** The brochure says "Prepared for: Valued Customer", because the form
+  collects no name.
+- **Scanned PDFs yield nothing.** No OCR, so image-only catalogs just produce a warning.
 - **Dependencies.** `google.generativeai` (embeddings) is deprecated; move to `google-genai`.
   Qdrant `recreate_collection` / `search` are deprecated.
 - **Leftovers:** empty `frontend-nextjs/`. The service directory is still named
