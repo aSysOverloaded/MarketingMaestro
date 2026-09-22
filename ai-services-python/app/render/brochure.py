@@ -126,6 +126,7 @@ def compile_html(
     output_dir: Path,
     catalog_brand: Optional[dict] = None,
     blurbs: Optional[dict] = None,
+    customer_name: Optional[str] = None,
 ) -> Path:
     catalog = brand_from_catalog(catalog_brand)
     by_id = {p.id: p for p in products}
@@ -151,6 +152,7 @@ def compile_html(
         brand=items[0]["brand"],
         segment=segment,
         trace_id=trace_id,
+        customer_name=(customer_name or "").strip() or "Valued Customer",
         items=items,
         copy={
             "headline": copy.get("headline", ""),

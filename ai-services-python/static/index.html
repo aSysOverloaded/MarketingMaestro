@@ -90,6 +90,11 @@
                 </div>
 
                 <div class="space-y-2">
+                    <label class="text-xs font-bold uppercase tracking-wider text-slate-400">Customer Name (optional)</label>
+                    <input type="text" name="name" placeholder="e.g. Maria Schmidt" class="glass-input w-full px-4 py-2.5 rounded-xl text-sm">
+                </div>
+
+                <div class="space-y-2">
                     <label class="text-xs font-bold uppercase tracking-wider text-slate-400">Location</label>
                     <input type="text" name="location" value="Seattle, WA" class="glass-input w-full px-4 py-2.5 rounded-xl text-sm" required>
                 </div>
@@ -380,11 +385,16 @@
             }
 
             const rows = ragDebug.matches.map(m => {
+                // A keyword-only hit has no similarity score; show how it was found instead.
                 const scoreColor = m.score >= 0.75 ? 'text-green-400' : (m.score >= 0.5 ? 'text-yellow-400' : 'text-red-400');
+                const score = (m.score == null)
+                    ? '<span class="font-mono text-blue-400">keyword</span>'
+                    : `<span class="font-mono ${scoreColor}">score ${m.score.toFixed(3)}</span>`;
+                const how = (m.matched_by && m.matched_by.length > 1) ? ' <span class="text-green-500">+kw</span>' : '';
                 return `
                     <div class="flex items-center justify-between border border-slate-800 rounded-lg px-3 py-1.5">
                         <span class="text-slate-400">Page ${m.page_number}</span>
-                        <span class="font-mono ${scoreColor}">score ${m.score.toFixed(3)}</span>
+                        <span>${score}${how}</span>
                         <span class="text-slate-500">${m.content_length} chars · ${m.image_count} img</span>
                     </div>
                 `;

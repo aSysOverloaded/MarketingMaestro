@@ -188,3 +188,19 @@ def test_single_interest_runs_are_untouched(no_llm):
     brochure._cover_every_hobby(ctx, balls)
     assert [r.product_id for r in ctx.recommendations] == before
     assert "hobby_coverage_added" not in ctx.review
+
+
+def test_the_customer_name_is_printed_when_given(tmp_path):
+    from app.catalog import Product, Recommendation
+
+    rec = Recommendation(recommendation_id="r", product_id="p", score=80, matched_rules=[], explanation="")
+    product = Product(id="p", model="Trail Tent")
+    copy = {"headline": "H", "subheadline": "S", "paragraphs": [], "cta": "C"}
+
+    named = compile_html(job_id="j1", trace_id="t", segment="Adventure", copy=copy, recommendations=[rec],
+                         products=[product], output_dir=tmp_path, customer_name="Maria Schmidt").read_text(encoding="utf-8")
+    assert "Prepared for: Maria Schmidt" in named
+
+    anonymous = compile_html(job_id="j2", trace_id="t", segment="Adventure", copy=copy, recommendations=[rec],
+                             products=[product], output_dir=tmp_path, customer_name="  ").read_text(encoding="utf-8")
+    assert "Prepared for: Valued Customer" in anonymous  # never invents a name

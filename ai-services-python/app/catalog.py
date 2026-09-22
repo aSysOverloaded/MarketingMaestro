@@ -11,6 +11,8 @@ from pydantic import BaseModel, Field
 
 class CustomerInput(BaseModel):
     """What the customer submitted on the form."""
+    # Optional: the brochure says "Valued Customer" when it is missing, rather than inventing one.
+    name: Optional[str] = None
     age: int
     income: float
     family_size: int

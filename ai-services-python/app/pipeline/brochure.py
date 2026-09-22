@@ -198,7 +198,8 @@ def _retrieve_candidates(ctx: JobContext) -> List[Product]:
     matches = sorted(merged.values(), key=lambda m: m["score"], reverse=True)[:MAX_COMBINED_MATCHES]
     ctx.rag_debug["match_count"] = len(matches)
     ctx.rag_debug["matches"] = [
-        {"page_number": m["page_number"], "block_index": m.get("block_index", 0), "score": m["score"],
+        {"page_number": m["page_number"], "block_index": m.get("block_index", 0), "score": m.get("score"),
+         "matched_by": sorted(set(m.get("matched_by", ["vector"]))),
          "image_count": len(m["images"]), "content_length": len(m["content"])}
         for m in matches
     ]
@@ -462,6 +463,7 @@ def html_step(ctx: JobContext) -> None:
         recommendations=ctx.recommendations,
         products=ctx.selected_products,
         blurbs=ctx.product_blurbs,
+        customer_name=ctx.customer.name,
         output_dir=settings.storage_dir / "temp_brochures",
         catalog_brand=(get_catalog() or {}).get("brand"),
     )

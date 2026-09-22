@@ -8,6 +8,36 @@ Open items that have been identified but not yet done live in [Backlog](#backlog
 
 ---
 
+## 2026-09-23 — Hybrid retrieval, and the customer's name on the brochure
+
+### Vector + BM25, fused by rank
+`app/rag/keyword.py` adds a BM25 index over the indexed blocks, and every query now runs both
+engines and fuses the rankings (reciprocal rank fusion, k=60). Vector search cannot find
+`80000274` - an embedding of a product code sits near every other product code - and BM25
+cannot find "something for camping". The catalogue is full of codes and brand names, so each
+covers the other's blind spot. The index is in memory (~450 blocks) and dropped whenever the
+catalog is re-indexed or cleared.
+
+A test caught a presentation bug while wiring this: a keyword-only hit was carrying its BM25
+score in the `score` field, which means cosine similarity everywhere else and is rendered as
+one in the UI. They are now separate fields, and diagnostics show how each block was found
+("keyword", or "+kw" when both engines agreed).
+
+### Customer name
+The brochure said "Prepared for: Valued Customer" because the form never asked. It is now an
+optional field, used on the cover only - blank or whitespace falls back to "Valued Customer"
+rather than inventing anything.
+
+- **Files:** `app/rag/keyword.py` (new), `app/rag/{search,index}.py`, `app/catalog.py`,
+  `app/main.py`, `app/render/brochure.py`, `app/pipeline/brochure.py`, `templates/brochure.html`,
+  `static/index.html`, `tests/test_keyword_search.py` (new), `tests/test_pipeline.py`
+- **Verified:** 96 tests, 7 new: an exact product code finding exactly its block, rare terms
+  outranking common ones, no-match queries, fusion ranking a doubly-found block first, a
+  keyword-only hit surviving fusion without a similarity score, index caching per collection,
+  and the name printed or falling back.
+
+---
+
 ## 2026-09-23 — Tested the outside-world paths; split the 659-line search.py
 
 ### The two paths that fail in front of a customer are now tested
@@ -692,7 +722,6 @@ Identified but not yet done. Ordered roughly by priority.
 - **Ingest is slower and costs more embedding requests now**: one request per block (644 for a
   133-page catalogue) instead of per page, plus ~0.8 s/page for layout parsing and rendering.
   One-off per catalog, but worth revisiting if quota is tight (e.g. skip colour-swatch blocks).
-- **Retrieval is vector-only.** No keyword/BM25 hybrid, so exact model codes match poorly.
 - **OCR** is still absent, but measured as *not* the bottleneck for this catalogue (0 empty
   pages). Needed only for scanned catalogues.
 - **Generic invented claims still rely on the LLM critic.** The grounding check catches
@@ -716,8 +745,6 @@ Identified but not yet done. Ordered roughly by priority.
 - **No quality measurement.** There is no fixed set of sample catalogs and profiles for
   measuring fallback rate, grounding violations or critic rejections across prompt and model
   changes. Every quality claim so far comes from one-off manual runs.
-- **Thin personalisation.** The brochure says "Prepared for: Valued Customer", because the form
-  collects no name.
 - **Scanned PDFs yield nothing.** No OCR, so image-only catalogs just produce a warning.
 - **Ingesting a large catalog is slow on free embeddings** (100 requests/minute, one per page),
   so ~100 pages per minute of waiting. One-time per catalog, but a 400-page catalog is a ~4

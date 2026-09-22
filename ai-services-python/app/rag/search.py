@@ -20,7 +20,7 @@ from app import diagnostics
 from app.ai.catalog_brand import detect_catalog_brand
 from app.config import settings
 from app.observability import log_stage
-from app.rag import extraction_cache
+from app.rag import extraction_cache, keyword
 from app.rag.blocks import (MIN_CHUNK_CHARS, chunk_pdf_by_layout, chunk_pdf_by_page,
                             filter_product_blocks, find_boilerplate_lines, strip_boilerplate)
 from app.rag.embeddings import embed_text, embed_texts
@@ -186,43 +186,57 @@ def get_stats() -> dict:
     }
 
 
+def _indexed_chunks() -> list:
+    """Every indexed block's payload, for the keyword index."""
+    points, _ = get_client().scroll(collection_name=_current_collection(), limit=100_000,
+                                    with_payload=True, with_vectors=False)
+    return [p.payload for p in points]
+
+
+def _as_match(payload: dict, score: float) -> dict:
+    return {
+        "chunk_id": payload.get("chunk_id", f"p{payload.get('page_number')}b0"),
+        "page_number": payload.get("page_number"),
+        "block_index": payload.get("block_index", 0),
+        "content": payload.get("content"),
+        "images": payload.get("images", []),
+        "score": score,
+    }
+
+
 def search_catalog(query: str, limit: int = 3, job_id: str = "unknown") -> list:
+    """Vector search and BM25 keyword search, fused by rank.
+
+    Vector search is good at meaning and poor at identifiers ("80000274", "TurboWash"); BM25 is
+    the reverse. Fusing the two rankings covers both (docs/DECISIONS.md D25).
+    """
     start = time.monotonic()
 
     if not _collection_exists():
         log_stage(logger, job_id, "search", f"query='{query}' collection does not exist yet, returning 0 matches", level="warning")
         return []
 
-    # 1. Generate query vector embedding
-    query_vector = embed_text(query, is_query=True)
+    collection = _current_collection()
+    # Each side contributes more candidates than requested, so fusion has something to work with.
+    candidates = max(limit * 3, 10)
 
-    # 2. Perform Cosine Similarity Search
-    search_results = get_client().search(
-        collection_name=_current_collection(),
-        query_vector=query_vector,
-        limit=limit
-    )
+    vector_hits = [
+        _as_match(hit.payload, hit.score)
+        for hit in get_client().search(collection_name=collection, query_vector=embed_text(query, is_query=True), limit=candidates)
+    ]
+    keyword_hits = [
+        _as_match(payload, score)
+        for payload, score in keyword.get_index(collection, _indexed_chunks).search(query, candidates)
+    ]
+    matches = keyword.fuse(vector_hits, keyword_hits, limit)
 
     duration_ms = int((time.monotonic() - start) * 1000)
-    if not search_results:
+    if not matches:
         log_stage(logger, job_id, "search", f"query='{query}' returned 0 matches (duration_ms={duration_ms})", level="warning")
     else:
-        scores = [f"{hit.score:.3f}" for hit in search_results]
-        pages = [hit.payload.get("page_number") for hit in search_results]
         log_stage(
             logger, job_id, "search",
-            f"query='{query}' matches={len(search_results)} scores={scores} pages={pages} duration_ms={duration_ms}"
+            f"query='{query}' matches={len(matches)} vector={len(vector_hits)} keyword={len(keyword_hits)} "
+            f"pages={[m['page_number'] for m in matches]} duration_ms={duration_ms}"
         )
-
-    # 3. Format and return matched payloads including images
-    matches = []
-    for hit in search_results:
-        matches.append({
-            "chunk_id": hit.payload.get("chunk_id", f"p{hit.payload.get('page_number')}b0"),
-            "page_number": hit.payload.get("page_number"),
-            "block_index": hit.payload.get("block_index", 0),
-            "content": hit.payload.get("content"),
-            "images": hit.payload.get("images", []),
-            "score": hit.score
-        })
     return matches

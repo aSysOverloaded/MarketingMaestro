@@ -141,6 +141,22 @@ text starts at x 175 - an "inside the block" test found nothing.
 
 ## Copy quality and trust
 
+### D25. Hybrid retrieval: vector + BM25, fused by rank
+**Decision.** Every query runs both a vector search and a BM25 keyword search over the indexed
+blocks; the two rankings are combined with reciprocal rank fusion (`1/(k+rank)`, k=60).
+
+**Why.** Vector search is good at meaning and bad at identifiers - an embedding of `80000274`
+sits near every other product code - while BM25 is the reverse. A catalogue is full of codes and
+brand names ("TurboWash", "WYVERN ECO"), so the two engines cover each other's blind spot.
+
+**Why rank fusion rather than score blending.** A cosine similarity and a BM25 score are not on
+comparable scales; normalising them would invent a relationship that does not exist. Ranks are
+comparable by construction.
+
+**Trade-off.** The keyword index is held in memory and rebuilt when the catalog changes (~450
+blocks, trivial). A BM25 score is deliberately *not* returned in the `score` field, which means
+cosine similarity everywhere else - a keyword-only hit shows as "keyword" in diagnostics instead.
+
 ### D10. Deterministic checks first, LLM critic second
 **Decision.** Every draft is checked by code (terms absent from the specs; banned words) before
 any LLM review, and the LLM reviews are skipped entirely when the code has already rejected it.
@@ -362,9 +378,9 @@ decision (D3), not an oversight; the fix is per-user catalogs (collection per us
 and moving jobs to a store outside the process.
 
 **"What's the weakest part?"**
-Retrieval is vector-only, so exact product codes match poorly; a keyword/BM25 hybrid is the
-next thing I would build. After that, the copy step is ~80% of run time and the writer is the
-single biggest call.
+The copy step is ~80% of run time and the writer is the single biggest call. After that:
+retrieval fuses vector and keyword search but never re-ranks, so a cross-encoder over the fused
+top-20 is the obvious next quality step.
 
 **"What would you do with a budget?"**
 Paid embeddings (removes the 1,000/day ceiling and most of the 8-minute ingest), a stronger
@@ -384,4 +400,5 @@ Kept deliberately visible rather than hidden:
   sentence each (D15), not full copy.
 - `/storage` is served publicly; job ids are unguessable but the folder is not access-controlled.
 - Free-tier quotas cap re-indexing at roughly two catalogs a day.
-- Brochure personalisation is thin: no customer name is collected.
+- Retrieval fuses two engines but does not re-rank; a cross-encoder would likely beat both.
+- The customer's name is optional and used only on the cover; nothing else is personalised by it.

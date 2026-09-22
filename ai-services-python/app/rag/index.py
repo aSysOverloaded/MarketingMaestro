@@ -15,7 +15,7 @@ from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams
 
 from app.config import settings
-from app.rag import extraction_cache
+from app.rag import extraction_cache, keyword
 from app.rag.embeddings import VECTOR_DIMENSION
 
 logger = logging.getLogger("rag.index")
@@ -93,6 +93,7 @@ def get_catalog() -> Optional[dict]:
 
 
 def clear_catalog() -> None:
+    keyword.forget()
     current = get_catalog()
     if _collection_exists():
         get_client().delete_collection(_current_collection())
@@ -108,6 +109,7 @@ def initialize_collection(name: str) -> None:
     process is killed) must not take the previously working catalog with it. Older collections
     are dropped by drop_other_collections() once the new one is indexed and recorded.
     """
+    keyword.forget()
     client = get_client()
     if _collection_exists(name):
         client.delete_collection(collection_name=name)

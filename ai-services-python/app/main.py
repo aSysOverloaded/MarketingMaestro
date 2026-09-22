@@ -46,6 +46,7 @@ settings.storage_dir.mkdir(parents=True, exist_ok=True)
 
 @app.post("/api/recommend", status_code=202)
 def recommend(
+    name: str = Form(""),
     age: Optional[int] = Form(None),
     income: Optional[float] = Form(None),
     family_size: Optional[int] = Form(None),
@@ -65,7 +66,8 @@ def recommend(
         "location": location.strip() or None,
         "hobbies": [h.strip() for h in hobbies.split(",") if h.strip()] or None,
     }
-    customer = CustomerInput(**{k: (DEFAULTS[k] if v is None else v) for k, v in submitted.items()})
+    customer = CustomerInput(name=name.strip() or None,
+                             **{k: (DEFAULTS[k] if v is None else v) for k, v in submitted.items()})
     ctx = JobContext(job_id=job_id, trace_id=trace_id, customer=customer)
     defaulted = [k for k, v in submitted.items() if v is None]
     if defaulted:
