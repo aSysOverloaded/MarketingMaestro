@@ -24,6 +24,44 @@ Tests (offline, no API keys needed): `venv/Scripts/python -m pytest`
 Benchmark (real API calls, ~4 min per run): `venv/Scripts/python -m scripts.benchmark --label NAME --runs 3`,
 then `--compare storage/benchmarks/A.json storage/benchmarks/B.json` to compare speed and quality side by side.
 
+## Using it
+
+1. Start the server, open http://127.0.0.1:8000, fill in the customer's details.
+2. **Upload the catalog PDF once.** It is indexed and reused by every later run, including
+   after a restart. The line under the upload box says which catalog the next run will use;
+   "forget it" there goes back to the built-in demo catalog. Re-uploading the same file is
+   cheap (the content hash is compared, so it is not re-embedded), but leaving the box empty
+   is faster.
+3. **Watch the progress list** while it runs (~2 minutes): each step, its timing, and what it
+   is doing ("Writing draft 2 (revising with reviewer feedback)").
+4. **Read the yellow "This run used fallbacks" box**, if it appears. No box = every AI step
+   worked. The box names the step and the reason, e.g. the AI writer being unavailable (so the
+   copy is generic), or a step being answered by the backup provider.
+5. Open the PDF, and use **Send** to email it (SMTP required; otherwise it is written to
+   `storage/sent_emails/`).
+
+### Getting good brochures
+
+- **Catalog quality decides product quality.** Pages need selectable text - scanned/image-only
+  PDFs index nothing (there is no OCR). Prices and specs are taken only from what a page
+  states; nothing is invented, so an unpriced page renders "Price on request".
+- **Hobbies drive retrieval.** One search runs per hobby, so "camping, cooking" searches the
+  catalog twice and covers both. Vague hobbies retrieve vague pages.
+- **Check Diagnostics** (bottom of the page) when results look wrong: `embeddings` must read
+  `real` (`mock` means the Gemini key is not working and retrieval is meaningless), and "Last
+  retrieval" shows which catalog pages matched, with scores.
+- **Nothing reaches the brochure unchecked.** An instant check rejects branded names, acronyms
+  and numbers that the specs do not contain, then the AI critic reviews the draft; rejected
+  drafts are rewritten with that feedback (twice at most). Unsupported ranking reasons are
+  dropped. If copy cannot be verified, claim-free generic copy is used and the run says so.
+
+### Free-tier notes
+
+Both providers are on free tiers, which are regularly overloaded or capped. A failed call is
+retried once on the backup provider automatically, and the run reports when that happened.
+If runs start showing fallback warnings constantly, switch `LLM_MODEL` (and/or the backup) to
+another free model; `docs/IMPROVEMENTS.md` records which ones worked and when.
+
 ## How a request flows
 
 `POST /api/recommend` (form fields + optional catalog PDF) starts a background job and returns `202 {job_id, status_url}`; poll `GET /api/jobs/{job_id}` for per-step progress and, when `status` is `done`, the `result`. Steps:
