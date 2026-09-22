@@ -17,7 +17,8 @@ from app.delivery.email import send_brochure
 from app.observability import log_stage
 from app.pipeline.brochure import JobContext, build_workflow, pdf_path_for
 from app.pipeline.workflow import WorkflowError
-from app.rag.search import clear_catalog, get_catalog, get_stats, ingest_pdf, search_catalog
+from app.rag.index import clear_catalog, get_catalog
+from app.rag.search import get_stats, ingest_pdf, search_catalog
 
 logging.basicConfig(
     level=logging.INFO,

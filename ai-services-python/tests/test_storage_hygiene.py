@@ -5,6 +5,7 @@ deleting them.
 """
 from app.config import settings
 from app.pipeline.brochure import KEEP_RECENT_OUTPUTS, prune_old_outputs
+from app.rag import index
 from app.rag import search
 
 
@@ -45,7 +46,7 @@ def test_replacing_a_catalog_drops_the_old_catalogs_images(isolated_storage):
     _make(root / "newcatalog9876543", "page_1_block_0.jpg", 2000)
     _make(root, "page_1_img_0.png", 1000)  # flat file from an older version
 
-    search._drop_other_image_folders(keep="newcatalog9876543")
+    index._drop_other_image_folders(keep="newcatalog9876543")
 
     assert (root / "newcatalog9876543" / "page_1_block_0.jpg").exists()
     assert not (root / "oldcatalog0123456").exists()

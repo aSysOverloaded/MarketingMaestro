@@ -273,6 +273,17 @@ take the server with it.
 
 ## Testing and measurement
 
+### D21b. One job per module in `app/rag/`
+**Decision.** `embeddings.py` (text → vectors), `blocks.py` (PDF → product blocks),
+`index.py` (collections and the catalog record), `search.py` (the ingest sequence and queries).
+
+**Why.** `search.py` had reached 659 lines doing all four, with a 121-line `ingest_pdf` - and
+both the stale-collection bug (D18) and the destructive-ingest bug (D17) lived in it. Code you
+cannot hold in your head is where those bugs come from.
+
+**Trade-off.** Four files to open instead of one, and a facade that re-exports nothing - callers
+import from the module that owns the job.
+
 ### D22. Tests never touch a real provider
 **Decision.** An autouse fixture stubs the single call point for every test; storage, keys and
 PDF rendering are redirected or disabled.

@@ -5,7 +5,6 @@ from langchain_core.prompts import ChatPromptTemplate
 
 from app.ai.llm import invoke_structured
 from app.ai.schemas import CriticOutput
-from app.observability import log_stage
 
 logger = logging.getLogger("ai.critic")
 

@@ -1,470 +1,37 @@
-import os
+"""Ingesting a catalog, and searching it.
+
+The pieces live next door: embeddings.py (text -> vectors), blocks.py (PDF -> product blocks),
+index.py (collections and the catalog record). This module is the sequence that uses them, and
+the query side.
+"""
+import hashlib
 import io
-import shutil
 import json
-import re
+import os
+import logging
 import time
 import uuid
-import hashlib
-import logging
 from datetime import datetime, timezone
-from typing import Optional
 
-import pdfplumber
 import pypdf
-from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, VectorParams, PointStruct
-import google.generativeai as genai
+from qdrant_client.models import PointStruct
 
 from app import diagnostics
-from app.config import settings
 from app.ai.catalog_brand import detect_catalog_brand
-from app.rag import extraction_cache
-from app.rag.layout import image_for_block, segment_words
+from app.config import settings
 from app.observability import log_stage
+from app.rag import extraction_cache
+from app.rag.blocks import (MIN_CHUNK_CHARS, chunk_pdf_by_layout, chunk_pdf_by_page,
+                            filter_product_blocks, find_boilerplate_lines, strip_boilerplate)
+from app.rag.embeddings import embed_text, embed_texts
+from app.rag.index import (INGEST_VERSION, _catalog_meta_path, _collection_exists, _current_collection,
+                           _drop_other_image_folders, collection_for, drop_other_collections,
+                           get_catalog, get_client, initialize_collection)
 
 logger = logging.getLogger("rag")
 
-# One collection per catalog, named from its content hash. qdrant-client 1.9's on-disk mode
-# does not really drop a deleted collection's points - after delete + create they are still
-# there - so reusing a single name left the previous catalog's products turning up in searches
-# for the new one (884 points indexed for a 644-chunk catalogue). A fresh name per catalog
-# sidesteps that entirely; the old collection is deleted too, for tidiness.
-COLLECTION_PREFIX = "catalog_"
 
-# What an index built by *this* code looks like. An indexed catalog is only reused when it was
-# built by the same version, so changing how ingest works re-indexes on the next upload instead
-# of quietly serving an index built by the old rules.
-#
-# Bump this whenever ingest output changes: chunking or segmentation, block filtering, the
-# stored payload, embedding model or dimensions, image selection, brand detection.
-#   1: one chunk per page
-#   2: layout-aware product blocks, per-block images
-#   3: non-product blocks filtered out, catalog brand detected
-INGEST_VERSION = 3
-
-
-def collection_for(catalog_sha: str) -> str:
-    return f"{COLLECTION_PREFIX}{catalog_sha[:16]}"
-
-
-def _current_collection() -> Optional[str]:
-    """Name of the collection holding the catalog currently in use, if any."""
-    meta_path = _catalog_meta_path()
-    if not meta_path.is_file():
-        return None
-    try:
-        return json.loads(meta_path.read_text(encoding="utf-8")).get("collection")
-    except Exception:
-        return None
-
-# Local on-disk Qdrant (storage/qdrant) so the indexed catalog survives restarts. Created
-# lazily: `python -m app.main` runs uvicorn with reload, which imports this module in both the
-# reloader and the worker process, and local Qdrant allows only one process per folder.
-_client: Optional[QdrantClient] = None
-
-
-def get_client() -> QdrantClient:
-    global _client
-    if _client is None:
-        path = settings.storage_dir / "qdrant"
-        path.mkdir(parents=True, exist_ok=True)
-        _client = QdrantClient(path=str(path))
-    return _client
-
-
-def _catalog_meta_path():
-    return settings.storage_dir / "catalog.json"
-
-
-VECTOR_DIMENSION = 768  # text-embedding-004 was retired; gemini-embedding-001 defaults to 3072
-                        # dims but supports output_dimensionality to request this size instead
-EMBEDDING_MODEL = "models/gemini-embedding-001"
-
-# One request per EMBED_BATCH pages instead of one request for the whole catalog. A big
-# catalog (hundreds of pages) made that single request fail, and the whole index silently
-# fell back to mock vectors.
-EMBED_BATCH = 50
-# Embedding models cap input length; a page far longer than this adds nothing to retrieval.
-MAX_EMBED_CHARS = 8000
-# Extracted page images are only ever used to pick one hero image per page, so keeping every
-# image of a large catalog just fills the disk.
-MAX_IMAGES_PER_PAGE = 2
-# Blocks shorter than this are page furniture, stray codes or captions: not worth an index
-# entry (and every entry costs an embedding request).
-MIN_CHUNK_CHARS = 80
-# Resolution for cropping a product photo out of the rendered page. JPEG, not PNG: 594 PNG
-# crops of one catalogue came to 117 MB, and these are photographs.
-IMAGE_RENDER_DPI = 110
-IMAGE_JPEG_QUALITY = 82
-# Smaller than this (in PDF points squared) is an icon or colour swatch, not a product shot.
-MIN_PRODUCT_IMAGE_AREA = 2500
-MIN_IMAGE_BYTES = 4096  # skip icons, logos, separators
-# Free-tier embedding quota is per minute and counts one request per text, so a large catalog
-# WILL hit it mid-ingest. Waiting and retrying is the difference between a fully indexed
-# catalog and one whose last pages hold meaningless mock vectors.
-EMBED_RETRIES = 4
-EMBED_RETRY_SECONDS = 25
-# A *query* embedding happens while the user waits, so it retries briefly and then gives up,
-# rather than freezing a run for a minute. Ingest is the opposite: it is a one-off background
-# cost, and a mock-vector page stays wrong until the catalog is re-uploaded.
-QUERY_EMBED_RETRIES = 1
-MAX_QUERY_WAIT_SECONDS = 10
-
-def _collection_exists(name: Optional[str] = None) -> bool:
-    name = name or _current_collection()
-    return bool(name) and any(c.name == name for c in get_client().get_collections().collections)
-
-
-def get_catalog() -> Optional[dict]:
-    """The currently indexed catalog ({filename, sha256, indexed_pages, indexed_at,
-    embeddings}), or None if nothing usable is indexed. Only a single catalog is kept at a
-    time (the app is single-user by design)."""
-    meta_path = _catalog_meta_path()
-    if not meta_path.is_file() or not _collection_exists():
-        return None
-    if get_client().get_collection(_current_collection()).points_count == 0:
-        return None
-    return json.loads(meta_path.read_text(encoding="utf-8"))
-
-
-def clear_catalog() -> None:
-    current = get_catalog()
-    if _collection_exists():
-        get_client().delete_collection(_current_collection())
-    _catalog_meta_path().unlink(missing_ok=True)
-    if current:
-        extraction_cache.clear(current["sha256"])
-
-
-def initialize_collection(name: str) -> None:
-    """Create an empty collection for this catalog, leaving any other catalog's alone.
-
-    Only this one is touched: an ingest that fails half way (the embedding quota runs out, the
-    process is killed) must not take the previously working catalog with it. Older collections
-    are dropped by drop_other_collections() once the new one is indexed and recorded.
-    """
-    client = get_client()
-    if _collection_exists(name):
-        client.delete_collection(collection_name=name)
-    client.create_collection(
-        collection_name=name,
-        vectors_config=VectorParams(size=VECTOR_DIMENSION, distance=Distance.COSINE),
-    )
-
-
-def _drop_other_image_folders(keep: str) -> None:
-    """Remove images belonging to catalogs no longer indexed (one catalogue's crops are ~30 MB)."""
-    root = settings.storage_dir / "extracted_images"
-    if not root.is_dir():
-        return
-    for entry in root.iterdir():
-        if entry.name != keep:
-            shutil.rmtree(entry, ignore_errors=True) if entry.is_dir() else entry.unlink(missing_ok=True)
-
-
-def drop_other_collections(keep: str) -> None:
-    client = get_client()
-    for existing in client.get_collections().collections:
-        if existing.name.startswith(COLLECTION_PREFIX) and existing.name != keep:
-            client.delete_collection(collection_name=existing.name)
-
-def _is_rate_limit(error: Exception) -> bool:
-    text = str(error).lower()
-    return "429" in text or "quota" in text or "rate limit" in text
-
-
-def _is_daily_cap(error: Exception) -> bool:
-    """A per-minute cap clears in a minute; a per-day cap does not clear today, so retrying it
-    just burns minutes before failing anyway."""
-    text = str(error).lower()
-    return "perday" in text.replace(" ", "") or "per day" in text or "requestsperday" in text.replace("_", "")
-
-
-def _retry_delay(error: Exception) -> int:
-    """Use the provider's own retry_delay when it gives one, else a fixed wait."""
-    match = re.search(r"retry[_ ]delay\s*{?\s*seconds:?\s*(\d+)", str(error), re.IGNORECASE)
-    if not match:
-        match = re.search(r"retry in (\d+)", str(error), re.IGNORECASE)
-    return min(int(match.group(1)) + 2, 60) if match else EMBED_RETRY_SECONDS
-
-
-def embed_text(text: str, is_query: bool = False) -> list:
-    api_key = settings.gemini_api_key
-    if not settings.has_gemini_key:
-        msg = "GEMINI_API_KEY is not set (checked via app.config.settings, not the raw process environment)"
-        logger.warning(f"[embed_text] {msg}, using mock vector fallback (retrieval scores will all be ~1.000 and meaningless)")
-        diagnostics.set_status("embeddings", "mock", msg)
-        return [0.1] * VECTOR_DIMENSION
-
-    genai.configure(api_key=api_key)
-    task_type = "retrieval_query" if is_query else "retrieval_document"
-    for attempt in range(QUERY_EMBED_RETRIES + 1):
-        try:
-            result = genai.embed_content(
-                model=EMBEDDING_MODEL,
-                content=text,
-                task_type=task_type,
-                output_dimensionality=VECTOR_DIMENSION,
-            )
-            diagnostics.set_status("embeddings", "real", None)
-            return result["embedding"]
-        except Exception as e:
-            if _is_rate_limit(e) and attempt < QUERY_EMBED_RETRIES:
-                delay = min(_retry_delay(e), MAX_QUERY_WAIT_SECONDS)
-                logger.warning(f"[embed_text] rate limited; waiting {delay}s and retrying once")
-                time.sleep(delay)
-                continue
-            # Fallback in case of rate limits or transient issues
-            logger.warning(f"[embed_text] embedding failed, using mock vector fallback: {e}")
-            diagnostics.set_status("embeddings", "mock", str(e))
-            return [0.1] * VECTOR_DIMENSION
-
-def embed_texts(texts: list, is_query: bool = False) -> list:
-    api_key = settings.gemini_api_key
-    if not settings.has_gemini_key:
-        msg = "GEMINI_API_KEY is not set (checked via app.config.settings, not the raw process environment)"
-        logger.warning(f"[embed_texts] {msg}, using mock vectors for {len(texts)} texts (retrieval scores will all be ~1.000 and meaningless)")
-        diagnostics.set_status("embeddings", "mock", msg)
-        return [[0.1] * VECTOR_DIMENSION] * len(texts)
-
-    genai.configure(api_key=api_key)
-    task_type = "retrieval_query" if is_query else "retrieval_document"
-    trimmed = [t[:MAX_EMBED_CHARS] for t in texts]
-    vectors = []
-    for start in range(0, len(trimmed), EMBED_BATCH):
-        batch = trimmed[start:start + EMBED_BATCH]
-        batch_no = start // EMBED_BATCH + 1
-        for attempt in range(EMBED_RETRIES + 1):
-            try:
-                result = genai.embed_content(
-                    model=EMBEDDING_MODEL,
-                    content=batch,
-                    task_type=task_type,
-                    output_dimensionality=VECTOR_DIMENSION,
-                )
-                vectors.extend(result["embedding"])
-                break
-            except Exception as e:
-                if _is_daily_cap(e):
-                    logger.error(f"[embed_texts] daily embedding quota reached; the rest of this catalog cannot be indexed today: {e}")
-                    diagnostics.set_status("embeddings", "mock", f"daily quota reached: {e}")
-                    vectors.extend([[0.1] * VECTOR_DIMENSION] * len(batch))
-                    break
-                if _is_rate_limit(e) and attempt < EMBED_RETRIES:
-                    delay = _retry_delay(e)
-                    logger.warning(f"[embed_texts] batch {batch_no} hit the embedding rate limit; waiting {delay}s and retrying (attempt {attempt + 1}/{EMBED_RETRIES})")
-                    time.sleep(delay)
-                    continue
-                # Only this batch degrades; the rest of the catalog still gets real vectors.
-                logger.warning(f"[embed_texts] batch {batch_no} failed for {len(batch)} texts, using mock vectors: {e}")
-                diagnostics.set_status("embeddings", "mock", str(e))
-                vectors.extend([[0.1] * VECTOR_DIMENSION] * len(batch))
-                break
-        if diagnostics.get_status("embeddings")["mode"] != "mock":
-            diagnostics.set_status("embeddings", "real", None)
-    return vectors
-
-# A line repeated on at least this share of pages is navigation/running header, not content.
-BOILERPLATE_PAGE_SHARE = 0.4
-MAX_BOILERPLATE_LINE_CHARS = 200
-
-
-def find_boilerplate_lines(page_texts: list) -> set:
-    """Lines that appear on a large share of pages: nav bars, running headers, page furniture.
-    They add nothing to retrieval and dilute every page's embedding towards the same centre."""
-    if len(page_texts) < 5:
-        return set()
-    counts = {}
-    for text in page_texts:
-        for line in {ln.strip() for ln in text.splitlines() if ln.strip()}:
-            if len(line) <= MAX_BOILERPLATE_LINE_CHARS:
-                counts[line] = counts.get(line, 0) + 1
-    threshold = max(2, int(len(page_texts) * BOILERPLATE_PAGE_SHARE))
-    return {line for line, n in counts.items() if n >= threshold}
-
-
-def strip_boilerplate(text: str, boilerplate: set) -> str:
-    return "\n".join(ln for ln in text.splitlines() if ln.strip() not in boilerplate).strip()
-
-
-def select_page_images(page, page_number: int, dest_dir: str) -> list:
-    """Save the largest MAX_IMAGES_PER_PAGE images of a page, biggest first.
-
-    Every image is measured before any is written: a catalogue page can carry dozens of images
-    (logos, colour swatches, icons), so taking the first ones that pass a size floor picks a
-    banner rather than the product. images[0] becomes the brochure's hero image.
-    """
-    candidates = []
-    for img_idx, img_file in enumerate(page.images):
-        if len(img_file.data) < MIN_IMAGE_BYTES:
-            continue  # icons/logos are never the hero image
-        try:
-            width, height = img_file.image.size
-            area = width * height
-        except Exception:
-            area = len(img_file.data)  # undecodable: byte size is a reasonable proxy
-        candidates.append((area, img_idx, img_file))
-
-    candidates.sort(key=lambda c: c[0], reverse=True)
-    paths = []
-    for area, img_idx, img_file in candidates[:MAX_IMAGES_PER_PAGE]:
-        ext = os.path.splitext(img_file.name)[1] if img_file.name else ".png"
-        if not ext or ext == ".":
-            ext = ".png"
-        name = f"page_{page_number}_img_{img_idx}{ext}"
-        with open(os.path.join(dest_dir, name), "wb") as f:
-            f.write(img_file.data)
-        paths.append(f"/storage/extracted_images/{name}")
-    return paths
-
-
-def _crop_block_image(plumber_page, block, page_number: int, block_index: int, dest_dir: str, rendered) -> Optional[str]:
-    """Save this block's product photo, cropped out of the rendered page.
-
-    Cropping the render (rather than pulling the embedded image stream) sidesteps exotic
-    encodings a browser could not display anyway, and keeps the picture tied to where the
-    product actually sits on the page.
-    """
-    image = image_for_block(plumber_page.images, block, min_area=MIN_PRODUCT_IMAGE_AREA)
-    if image is None:
-        return None
-
-    scale = IMAGE_RENDER_DPI / 72
-    box = (max(image["x0"] * scale, 0), max(image["top"] * scale, 0),
-           min(image["x1"] * scale, rendered.width), min(image["bottom"] * scale, rendered.height))
-    if box[2] - box[0] < 20 or box[3] - box[1] < 20:
-        return None
-    name = f"page_{page_number}_block_{block_index}.jpg"
-    rendered.crop(box).convert("RGB").save(os.path.join(dest_dir, name), "JPEG", quality=IMAGE_JPEG_QUALITY)
-    return f"/storage/extracted_images/{os.path.basename(dest_dir)}/{name}"
-
-
-def chunk_pdf_by_layout(pdf_bytes: bytes, dest_dir: str, job_id: str) -> tuple:
-    """Split every page into product-sized blocks with their own images (see app/rag/layout.py).
-
-    Returns (chunks, stats). Falls back to one chunk per page - the previous behaviour - for
-    any page pdfplumber cannot read.
-    """
-    chunks, stats = [], {"pages_with_text": 0, "image_failures": 0, "pages_fallback": 0}
-    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
-        for page_index, plumber_page in enumerate(pdf.pages):
-            page_number = page_index + 1
-            try:
-                blocks = segment_words(plumber_page.extract_words())
-            except Exception as e:
-                log_stage(logger, job_id, "ingest", f"layout parsing failed on page {page_number}: {e}", level="warning")
-                blocks = []
-                stats["pages_fallback"] += 1
-
-            blocks = merge_support_blocks(blocks)
-            kept = [b for b in blocks if len(b.text) >= MIN_CHUNK_CHARS]
-            if not kept:
-                continue
-            stats["pages_with_text"] += 1
-
-            rendered = None
-            for block_index, block in enumerate(kept):
-                image_path = None
-                try:
-                    if plumber_page.images:
-                        if rendered is None:
-                            rendered = plumber_page.to_image(resolution=IMAGE_RENDER_DPI).original
-                        image_path = _crop_block_image(plumber_page, block, page_number, block_index, dest_dir, rendered)
-                except Exception as e:
-                    stats["image_failures"] += 1
-                    log_stage(logger, job_id, "ingest", f"image crop failed on page {page_number}: {e}", level="warning")
-
-                chunks.append({
-                    "chunk_id": f"p{page_number}b{block_index}",
-                    "page_number": page_number,
-                    "block_index": block_index,
-                    "content": block.text,
-                    "images": [image_path] if image_path else [],
-                })
-            plumber_page.close()  # pdfplumber caches per-page objects; large catalogs need this
-    return chunks, stats
-
-
-def chunk_pdf_by_page(pdf_bytes: bytes, dest_dir: str, job_id: str) -> tuple:
-    """Fallback chunking: one chunk per page, images picked by size (pypdf)."""
-    reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
-    chunks, stats = [], {"pages_with_text": 0, "image_failures": 0, "pages_fallback": len(reader.pages)}
-    for i, page in enumerate(reader.pages):
-        text = (page.extract_text() or "").strip()
-        if not text:
-            continue
-        stats["pages_with_text"] += 1
-        try:
-            images = select_page_images(page, i + 1, dest_dir)
-        except Exception as e:
-            images = []
-            stats["image_failures"] += 1
-            log_stage(logger, job_id, "ingest", f"failed to extract images on page {i+1}: {e}", level="warning")
-        chunks.append({"chunk_id": f"p{i + 1}b0", "page_number": i + 1, "block_index": 0,
-                       "content": text, "images": images})
-    return chunks, stats
-
-
-# Catalogs carry front matter: covers, index pages, brand stories, campus photos. They are not
-# products, but they cost an embedding request each and compete in search (a run actually
-# matched the cover page). A block is taken to be a product when it states a price or a long
-# product code.
-_PRICE = re.compile(r"(?:UVP|EUR|USD|GBP|INR|[€$£₹])\s?\d+[.,]?\d*", re.IGNORECASE)
-_PRODUCT_CODE = re.compile(r"(?<!\d)\d{6,9}(?!\d)")
-# Below this share, the catalog simply does not print prices or codes, and filtering would
-# throw the whole catalog away - so everything is kept.
-MIN_PRODUCT_BLOCK_SHARE = 0.3
-
-
-def looks_like_product(text: str) -> bool:
-    return bool(_PRICE.search(text) or _PRODUCT_CODE.search(text))
-
-
-# A support block (colour swatch row, size run) states no price or code of its own but belongs
-# to the product beside it. Merging it in gives the extractor the colours it would otherwise
-# never see - the real catalogue lists them in separate blocks - and saves an embedding request.
-MAX_SUPPORT_BLOCK_CHARS = 500
-MAX_SUPPORT_DISTANCE = 400.0
-
-
-def merge_support_blocks(blocks: list) -> list:
-    """Fold colour/size blocks into the nearest product block on the same page."""
-    products = [b for b in blocks if looks_like_product(b.text)]
-    if not products:
-        return blocks
-
-    extra_text: dict = {}
-    merged_away = set()
-    for index, block in enumerate(blocks):
-        if block in products or len(block.text) > MAX_SUPPORT_BLOCK_CHARS:
-            continue
-        centre_x, centre_y = (block.x0 + block.x1) / 2, (block.top + block.bottom) / 2
-        nearest = min(products, key=lambda p: p.distance_to(centre_x, centre_y))
-        if nearest.distance_to(centre_x, centre_y) > MAX_SUPPORT_DISTANCE:
-            continue
-        extra_text.setdefault(id(nearest), []).append(block.text)
-        merged_away.add(index)
-
-    result = []
-    for index, block in enumerate(blocks):
-        if index in merged_away:
-            continue
-        if id(block) in extra_text:
-            block.text = block.text + "\n" + "\n".join(extra_text[id(block)])
-        result.append(block)
-    return result
-
-
-def filter_product_blocks(chunks: list, job_id: str = "unknown") -> list:
-    """Keep only product blocks - unless too few blocks look like products to judge."""
-    product_chunks = [c for c in chunks if looks_like_product(c["content"])]
-    if not chunks or len(product_chunks) / len(chunks) < MIN_PRODUCT_BLOCK_SHARE:
-        return chunks
-    log_stage(logger, job_id, "ingest",
-              f"keeping {len(product_chunks)} product block(s), dropping {len(chunks) - len(product_chunks)} "
-              f"non-product block(s) (covers, index, brand pages)")
-    return product_chunks
+logger = logging.getLogger("rag")
 
 
 def ingest_pdf(pdf_bytes: bytes, job_id: str = "unknown", filename: str = "catalog.pdf") -> dict:
@@ -590,6 +157,7 @@ def ingest_pdf(pdf_bytes: bytes, job_id: str = "unknown", filename: str = "catal
         "reused": False,
     }
 
+
 def get_stats() -> dict:
     # embeddings_mode reflects the outcome of the LAST actual embed_content call, not just
     # whether GEMINI_API_KEY is set - a set key doesn't guarantee the calls are succeeding.
@@ -616,6 +184,7 @@ def get_stats() -> dict:
         "embeddings_mode": embeddings_mode,
         "embeddings_detail": embeddings_detail,
     }
+
 
 def search_catalog(query: str, limit: int = 3, job_id: str = "unknown") -> list:
     start = time.monotonic()

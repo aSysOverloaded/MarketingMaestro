@@ -8,6 +8,41 @@ Open items that have been identified but not yet done live in [Backlog](#backlog
 
 ---
 
+## 2026-09-23 — Tested the outside-world paths; split the 659-line search.py
+
+### The two paths that fail in front of a customer are now tested
+Coverage measurement (`pytest --cov`) showed the least-tested modules were the two that reach
+the outside world: `render/pdf.py` at **27%** and `delivery/email.py` at **32%** - the actual
+SMTP send and the whole browser path. Nine new tests cover: email logged when SMTP is
+unconfigured; STARTTLS on the default port with the PDF attached; implicit TLS with certificate
+checking on 465; an authentication failure raising rather than reporting success; the PDF
+renderer running a child process with a timeout; a failed render surfacing the child's error;
+an empty PDF treated as a failure; an installed Chrome/Edge preferred over the bundled browser;
+and no browser at all explaining how to fix it. `launch_browser` was extracted so the fallback
+chain can be driven with a fake.
+
+### search.py split
+It had grown to **659 lines doing six jobs** (embeddings, chunking, image cropping, collections,
+catalog metadata, brand detection) with a 121-line `ingest_pdf` - and it is where both the
+stale-collection and destructive-ingest bugs lived. Now:
+
+| module | lines | job |
+|---|---|---|
+| `app/rag/embeddings.py` | 150 | text → vectors, rate-limit handling |
+| `app/rag/blocks.py` | 254 | PDF → product blocks with images |
+| `app/rag/index.py` | 134 | collections, catalog record, reuse rules |
+| `app/rag/search.py` | 228 | ingest sequence and querying |
+
+`pyflakes` was added to the loop while splitting and caught four genuine leftovers (a missing
+`hashlib`/`io`/`os` import, unused imports, an unused local).
+
+- **Files:** `app/rag/{embeddings,blocks,index,search}.py`, `app/render/pdf.py`, `app/main.py`,
+  `app/pipeline/brochure.py`, `tests/test_delivery.py` (new), tests updated for the new modules
+- **Verified:** 89 tests. Coverage of the delivery paths rose from 27%/32%; the split is
+  behaviour-preserving (the same suite passes before and after).
+
+---
+
 ## 2026-09-23 — Copy for every product, colours reach products, docs/DECISIONS.md
 
 ### Every product page gets fact-checked copy
@@ -687,6 +722,8 @@ Identified but not yet done. Ordered roughly by priority.
 - **Ingesting a large catalog is slow on free embeddings** (100 requests/minute, one per page),
   so ~100 pages per minute of waiting. One-time per catalog, but a 400-page catalog is a ~4
   minute ingest. A paid tier or a local embedding model removes this.
+- **Untested error branches remain** in `extractor` (duplicate ids) and `evaluator` (degraded
+  path); `config.py` startup logging is untested.
 - **Dependencies.** `google.generativeai` (embeddings) is deprecated; move to `google-genai`.
   Qdrant `recreate_collection` / `search` are deprecated.
 - **Leftovers:** empty `frontend-nextjs/`. The service directory is still named

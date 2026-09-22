@@ -30,7 +30,8 @@ from app.config import settings
 from app.observability import log_stage
 from app.pipeline.workflow import Step, Workflow
 from app.rag import extraction_cache
-from app.rag.search import get_catalog, search_catalog
+from app.rag.index import get_catalog
+from app.rag.search import search_catalog
 from app.render.brochure import compile_html
 from app.render.pdf import render_pdf
 
@@ -238,8 +239,8 @@ def recommend_step(ctx: JobContext) -> None:
         ctx.recommendations = score_products(ctx.customer, candidates, ctx.job_id)
         ctx.warn("recommend", f"AI ranking unavailable ({e}); used rule-based scoring.")
 
-    by_id = {p.id: p for p in candidates}
     _cover_every_hobby(ctx, candidates)
+    by_id = {p.id: p for p in candidates}
     ctx.selected_products = [by_id[r.product_id] for r in ctx.recommendations]
     _ground_recommendations(ctx)
 
@@ -258,7 +259,6 @@ def _cover_every_hobby(ctx: JobContext, candidates: List[Product]) -> None:
         return ctx.product_hobbies.get(product_id, set())
 
     covered = {h for r in ctx.recommendations for h in hobbies_of(r.product_id)}
-    by_id = {p.id: p for p in candidates}
     for hobby in sorted(hobbies - covered):
         pick = next((p for p in candidates if hobby in hobbies_of(p.id) and p.id not in {r.product_id for r in ctx.recommendations}), None)
         if pick is None:

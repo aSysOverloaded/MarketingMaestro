@@ -1,6 +1,8 @@
 """The indexed catalog persists across runs and restarts, and is reused when no file is sent."""
 from fastapi.testclient import TestClient
 
+from app import diagnostics
+from app.rag import blocks, embeddings, index
 import app.rag.search as search
 
 
@@ -29,8 +31,8 @@ PDF = _pdf("Trail Tent 2-person camping tent")
 
 
 def _restart():
-    search._client.close()
-    search._client = None
+    index._client.close()
+    index._client = None
 
 
 def test_catalog_survives_restart_and_mock_embeddings_are_redone():
@@ -47,7 +49,7 @@ def test_catalog_survives_restart_and_mock_embeddings_are_redone():
 
 def test_identical_upload_with_real_embeddings_is_not_re_embedded(monkeypatch):
     search.ingest_pdf(PDF, filename="tents.pdf")
-    meta = search._catalog_meta_path()
+    meta = index._catalog_meta_path()
     meta.write_text(meta.read_text().replace('"mock"', '"real"'))
     assert search.ingest_pdf(PDF, filename="tents.pdf")["reused"]
 
@@ -79,21 +81,21 @@ def test_large_catalogs_are_embedded_in_batches(monkeypatch):
     from app.config import settings
 
     monkeypatch.setattr(settings, "gemini_api_key", "test-key")
-    monkeypatch.setattr(search.genai, "configure", lambda **kw: None)
+    monkeypatch.setattr(embeddings.genai, "configure", lambda **kw: None)
     batches = []
 
     def fake_embed(model, content, task_type, output_dimensionality):
         batches.append(len(content))
-        assert all(len(c) <= search.MAX_EMBED_CHARS for c in content)
-        return {"embedding": [[0.2] * search.VECTOR_DIMENSION] * len(content)}
+        assert all(len(c) <= embeddings.MAX_EMBED_CHARS for c in content)
+        return {"embedding": [[0.2] * embeddings.VECTOR_DIMENSION] * len(content)}
 
-    monkeypatch.setattr(search.genai, "embed_content", fake_embed)
+    monkeypatch.setattr(embeddings.genai, "embed_content", fake_embed)
 
     pages = [f"page {i} " + "x" * 20000 for i in range(120)]
-    vectors = search.embed_texts(pages)
+    vectors = embeddings.embed_texts(pages)
     assert len(vectors) == 120
-    assert batches == [search.EMBED_BATCH, search.EMBED_BATCH, 20]
-    assert search.diagnostics.get_status("embeddings")["mode"] == "real"
+    assert batches == [embeddings.EMBED_BATCH, embeddings.EMBED_BATCH, 20]
+    assert diagnostics.get_status("embeddings")["mode"] == "real"
 
 
 def test_one_failing_batch_does_not_fake_the_whole_catalog(monkeypatch):
@@ -102,21 +104,21 @@ def test_one_failing_batch_does_not_fake_the_whole_catalog(monkeypatch):
     from app.config import settings
 
     monkeypatch.setattr(settings, "gemini_api_key", "test-key")
-    monkeypatch.setattr(search.genai, "configure", lambda **kw: None)
+    monkeypatch.setattr(embeddings.genai, "configure", lambda **kw: None)
     calls = {"n": 0}
 
     def flaky(model, content, task_type, output_dimensionality):
         calls["n"] += 1
         if calls["n"] == 2:
             raise RuntimeError("malformed request")
-        return {"embedding": [[0.2] * search.VECTOR_DIMENSION] * len(content)}
+        return {"embedding": [[0.2] * embeddings.VECTOR_DIMENSION] * len(content)}
 
-    monkeypatch.setattr(search.genai, "embed_content", flaky)
+    monkeypatch.setattr(embeddings.genai, "embed_content", flaky)
 
-    vectors = search.embed_texts([f"page {i}" for i in range(120)])
+    vectors = embeddings.embed_texts([f"page {i}" for i in range(120)])
     assert len(vectors) == 120
     assert vectors[0][0] == 0.2 and vectors[60][0] == 0.1  # batch 1 real, batch 2 mock
-    assert search.diagnostics.get_status("embeddings")["mode"] == "mock"
+    assert diagnostics.get_status("embeddings")["mode"] == "mock"
 
 
 def test_rate_limited_batches_wait_and_retry(monkeypatch):
@@ -125,23 +127,23 @@ def test_rate_limited_batches_wait_and_retry(monkeypatch):
     from app.config import settings
 
     monkeypatch.setattr(settings, "gemini_api_key", "test-key")
-    monkeypatch.setattr(search.genai, "configure", lambda **kw: None)
+    monkeypatch.setattr(embeddings.genai, "configure", lambda **kw: None)
     slept = []
-    monkeypatch.setattr(search.time, "sleep", slept.append)
+    monkeypatch.setattr(embeddings.time, "sleep", slept.append)
     calls = {"n": 0}
 
     def rate_limited_once(model, content, task_type, output_dimensionality):
         calls["n"] += 1
         if calls["n"] == 1:
             raise RuntimeError("429 quota exceeded ... retry_delay { seconds: 21 }")
-        return {"embedding": [[0.3] * search.VECTOR_DIMENSION] * len(content)}
+        return {"embedding": [[0.3] * embeddings.VECTOR_DIMENSION] * len(content)}
 
-    monkeypatch.setattr(search.genai, "embed_content", rate_limited_once)
+    monkeypatch.setattr(embeddings.genai, "embed_content", rate_limited_once)
 
-    vectors = search.embed_texts([f"page {i}" for i in range(10)])
+    vectors = embeddings.embed_texts([f"page {i}" for i in range(10)])
     assert slept == [23]  # provider's own retry_delay + a margin
     assert vectors[0][0] == 0.3  # real vectors, not the mock fallback
-    assert search.diagnostics.get_status("embeddings")["mode"] == "real"
+    assert diagnostics.get_status("embeddings")["mode"] == "real"
 
 
 def test_query_embeddings_give_up_quickly(monkeypatch):
@@ -150,19 +152,19 @@ def test_query_embeddings_give_up_quickly(monkeypatch):
     from app.config import settings
 
     monkeypatch.setattr(settings, "gemini_api_key", "test-key")
-    monkeypatch.setattr(search.genai, "configure", lambda **kw: None)
+    monkeypatch.setattr(embeddings.genai, "configure", lambda **kw: None)
     slept = []
-    monkeypatch.setattr(search.time, "sleep", slept.append)
+    monkeypatch.setattr(embeddings.time, "sleep", slept.append)
 
     def always_rate_limited(**kw):
         raise RuntimeError("429 quota exceeded ... retry_delay { seconds: 45 }")
 
-    monkeypatch.setattr(search.genai, "embed_content", always_rate_limited)
+    monkeypatch.setattr(embeddings.genai, "embed_content", always_rate_limited)
 
-    vector = search.embed_text("gear for camping", is_query=True)
-    assert slept == [search.MAX_QUERY_WAIT_SECONDS]  # capped, not the provider's 45s
-    assert vector == [0.1] * search.VECTOR_DIMENSION  # degraded, and reported as mock
-    assert search.diagnostics.get_status("embeddings")["mode"] == "mock"
+    vector = embeddings.embed_text("gear for camping", is_query=True)
+    assert slept == [embeddings.MAX_QUERY_WAIT_SECONDS]  # capped, not the provider's 45s
+    assert vector == [0.1] * embeddings.VECTOR_DIMENSION  # degraded, and reported as mock
+    assert diagnostics.get_status("embeddings")["mode"] == "mock"
 
 
 def test_ingesting_a_new_catalog_drops_the_previous_one(monkeypatch):
@@ -173,13 +175,13 @@ def test_ingesting_a_new_catalog_drops_the_previous_one(monkeypatch):
     monkeypatch.setattr(settings, "gemini_api_key", "")  # mock vectors: no API needed
 
     search.ingest_pdf(_pdf("Trail Tent 2-person camping tent"), filename="first.pdf")
-    first_points = search.get_client().get_collection(search._current_collection()).points_count
+    first_points = index.get_client().get_collection(index._current_collection()).points_count
     assert first_points >= 1
 
     search.ingest_pdf(_pdf("Rhenium Basketball Ball size 7"), filename="second.pdf")
     contents = " ".join(
         (p.payload.get("content") or "")
-        for p in search.get_client().scroll(collection_name=search._current_collection(), limit=100, with_payload=True)[0]
+        for p in index.get_client().scroll(collection_name=index._current_collection(), limit=100, with_payload=True)[0]
     )
     assert "Rhenium" in contents
     assert "Trail Tent" not in contents
@@ -193,13 +195,13 @@ def test_non_product_blocks_are_dropped_when_the_catalog_prices_things():
         "RHENIUM BASKETBALL BALL UVP 59,99", "PROMETIUM BALL 80000274 8 panels",
         "NOBIUM PRO BALL EUR 98.99", "A SUCCESS STORY since the beginning we have designed",
     ]]
-    kept = [c["content"] for c in search.filter_product_blocks(chunks)]
+    kept = [c["content"] for c in blocks.filter_product_blocks(chunks)]
     assert len(kept) == 3 and not any("SUCCESS STORY" in c for c in kept)
 
 
 def test_a_catalog_without_prices_or_codes_is_kept_whole():
     chunks = [{"content": t} for t in ["Trail Tent, ripstop nylon", "Camp Stove, piezo ignition", "About our company"]]
-    assert len(search.filter_product_blocks(chunks)) == 3  # filtering would throw it all away
+    assert len(blocks.filter_product_blocks(chunks)) == 3  # filtering would throw it all away
 
 
 def test_changing_how_ingest_works_reindexes_the_same_catalog(monkeypatch):
@@ -209,14 +211,14 @@ def test_changing_how_ingest_works_reindexes_the_same_catalog(monkeypatch):
 
     monkeypatch.setattr(settings, "gemini_api_key", "")
     assert not search.ingest_pdf(PDF, filename="c.pdf")["reused"]
-    assert search.get_catalog()["ingest_version"] == search.INGEST_VERSION
+    assert search.get_catalog()["ingest_version"] == index.INGEST_VERSION
     # same bytes, same ingest version: no work
-    meta = search._catalog_meta_path()
+    meta = index._catalog_meta_path()
     meta.write_text(meta.read_text().replace('"mock"', '"real"'))
     assert search.ingest_pdf(PDF, filename="c.pdf")["reused"]
 
     # a newer ingest version invalidates it, with no user action
-    monkeypatch.setattr(search, "INGEST_VERSION", search.INGEST_VERSION + 1)
+    monkeypatch.setattr(search, "INGEST_VERSION", index.INGEST_VERSION + 1)
     assert not search.ingest_pdf(PDF, filename="c.pdf")["reused"]
     assert search.get_catalog()["ingest_version"] == search.INGEST_VERSION
 
@@ -230,7 +232,7 @@ def test_reindexing_drops_products_cached_against_the_old_chunks(monkeypatch):
     sha = search.get_catalog()["sha256"]
     extraction_cache.put_many(sha, {"p1b0": [{"id": "old", "model": "From the old chunking"}]})
 
-    monkeypatch.setattr(search, "INGEST_VERSION", search.INGEST_VERSION + 1)
+    monkeypatch.setattr(search, "INGEST_VERSION", index.INGEST_VERSION + 1)
     search.ingest_pdf(PDF, filename="c.pdf")
     assert extraction_cache.get_many(sha, ["p1b0"]) == {}
 
@@ -256,16 +258,16 @@ def test_a_daily_quota_is_not_retried(monkeypatch):
     from app.config import settings
 
     monkeypatch.setattr(settings, "gemini_api_key", "test-key")
-    monkeypatch.setattr(search.genai, "configure", lambda **kw: None)
+    monkeypatch.setattr(embeddings.genai, "configure", lambda **kw: None)
     slept = []
-    monkeypatch.setattr(search.time, "sleep", slept.append)
+    monkeypatch.setattr(embeddings.time, "sleep", slept.append)
 
     def daily_cap(**kw):
         raise RuntimeError('429 quota exceeded quota_id: "EmbedContentRequestsPerDayPerUserPerProjectPerModel-FreeTier"')
 
-    monkeypatch.setattr(search.genai, "embed_content", daily_cap)
-    vectors = search.embed_texts(["page one", "page two"])
+    monkeypatch.setattr(embeddings.genai, "embed_content", daily_cap)
+    vectors = embeddings.embed_texts(["page one", "page two"])
 
     assert slept == [], "waited on a quota that will not clear today"
-    assert vectors == [[0.1] * search.VECTOR_DIMENSION] * 2
-    assert "daily quota" in search.diagnostics.get_status("embeddings")["detail"]
+    assert vectors == [[0.1] * embeddings.VECTOR_DIMENSION] * 2
+    assert "daily quota" in diagnostics.get_status("embeddings")["detail"]

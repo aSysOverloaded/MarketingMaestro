@@ -33,23 +33,25 @@ def render_pdf(html_path: Path, pdf_path: Path) -> None:
         raise RuntimeError("PDF render produced no output file")
 
 
+def launch_browser(playwright):
+    """First usable browser: an installed Chrome or Edge (no download), else the bundled one."""
+    errors = []
+    for channel in _CHANNELS:
+        try:
+            return playwright.chromium.launch(channel=channel) if channel else playwright.chromium.launch()
+        except Exception as e:
+            errors.append(f"{channel or 'bundled chromium'}: {str(e).splitlines()[0]}")
+    raise RuntimeError(
+        "No usable browser for PDF rendering. Install Chrome/Edge or run "
+        "`python -m playwright install chromium`. Tried: " + "; ".join(errors)
+    )
+
+
 def _render_in_this_process(html_path: Path, pdf_path: Path) -> None:
     from playwright.sync_api import sync_playwright
 
-    errors = []
     with sync_playwright() as p:
-        browser = None
-        for channel in _CHANNELS:
-            try:
-                browser = p.chromium.launch(channel=channel) if channel else p.chromium.launch()
-                break
-            except Exception as e:
-                errors.append(f"{channel or 'bundled chromium'}: {str(e).splitlines()[0]}")
-        if browser is None:
-            raise RuntimeError(
-                "No usable browser for PDF rendering. Install Chrome/Edge or run "
-                "`python -m playwright install chromium`. Tried: " + "; ".join(errors)
-            )
+        browser = launch_browser(p)
         try:
             page = browser.new_page()
             # networkidle waits for the Tailwind CDN stylesheet and web fonts to load.
