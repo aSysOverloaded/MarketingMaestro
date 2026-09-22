@@ -60,6 +60,11 @@ MIN_IMAGE_BYTES = 4096  # skip icons, logos, separators
 # catalog and one whose last pages hold meaningless mock vectors.
 EMBED_RETRIES = 4
 EMBED_RETRY_SECONDS = 25
+# A *query* embedding happens while the user waits, so it retries briefly and then gives up,
+# rather than freezing a run for a minute. Ingest is the opposite: it is a one-off background
+# cost, and a mock-vector page stays wrong until the catalog is re-uploaded.
+QUERY_EMBED_RETRIES = 1
+MAX_QUERY_WAIT_SECONDS = 10
 
 def _collection_exists() -> bool:
     return any(c.name == COLLECTION_NAME for c in get_client().get_collections().collections)
@@ -112,20 +117,26 @@ def embed_text(text: str, is_query: bool = False) -> list:
 
     genai.configure(api_key=api_key)
     task_type = "retrieval_query" if is_query else "retrieval_document"
-    try:
-        result = genai.embed_content(
-            model=EMBEDDING_MODEL,
-            content=text,
-            task_type=task_type,
-            output_dimensionality=VECTOR_DIMENSION,
-        )
-        diagnostics.set_status("embeddings", "real", None)
-        return result["embedding"]
-    except Exception as e:
-        # Fallback in case of rate limits or transient issues
-        logger.warning(f"[embed_text] embedding failed, using mock vector fallback: {e}")
-        diagnostics.set_status("embeddings", "mock", str(e))
-        return [0.1] * VECTOR_DIMENSION
+    for attempt in range(QUERY_EMBED_RETRIES + 1):
+        try:
+            result = genai.embed_content(
+                model=EMBEDDING_MODEL,
+                content=text,
+                task_type=task_type,
+                output_dimensionality=VECTOR_DIMENSION,
+            )
+            diagnostics.set_status("embeddings", "real", None)
+            return result["embedding"]
+        except Exception as e:
+            if _is_rate_limit(e) and attempt < QUERY_EMBED_RETRIES:
+                delay = min(_retry_delay(e), MAX_QUERY_WAIT_SECONDS)
+                logger.warning(f"[embed_text] rate limited; waiting {delay}s and retrying once")
+                time.sleep(delay)
+                continue
+            # Fallback in case of rate limits or transient issues
+            logger.warning(f"[embed_text] embedding failed, using mock vector fallback: {e}")
+            diagnostics.set_status("embeddings", "mock", str(e))
+            return [0.1] * VECTOR_DIMENSION
 
 def embed_texts(texts: list, is_query: bool = False) -> list:
     api_key = settings.gemini_api_key

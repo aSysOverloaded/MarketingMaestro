@@ -101,6 +101,11 @@ def _note_fallback(ctx: JobContext, purpose: str, step: str) -> None:
 
 
 def profile_step(ctx: JobContext) -> None:
+    if not settings.use_llm_profile:
+        # Deliberate: the rules derive the segment from the same inputs, instantly. Not a
+        # fallback, so it is not reported as one.
+        ctx.profile = rule_based_profile(ctx.customer, ctx.job_id)
+        return
     try:
         ctx.profile = classify_profile(ctx.customer, ctx.job_id)
         _note_fallback(ctx, "profile", "profile")
@@ -216,6 +221,10 @@ def _ground_recommendations(ctx: JobContext) -> None:
 
 
 def plan_step(ctx: JobContext) -> None:
+    if not settings.use_llm_planner:
+        # Deliberate: the writer is asked to structure the copy itself, saving a round trip.
+        ctx.sections = []
+        return
     try:
         ctx.sections = generate_plan(ctx.profile.segment, ctx.recommendations[0].model_dump(), job_id=ctx.job_id)
         _note_fallback(ctx, "planner", "plan")
@@ -274,7 +283,8 @@ def _review(ctx: JobContext, draft: dict, product: dict, warned: set, attempt: i
     ctx.review.setdefault("calls", [])
     with ThreadPoolExecutor(max_workers=2) as pool:
         critic_future = pool.submit(run_critic)
-        evaluation = pool.submit(run_evaluator).result()
+        # The tone score is reported, never acted on, so it is off by default (USE_LLM_TONE_EVALUATOR).
+        evaluation = pool.submit(run_evaluator).result() if settings.use_llm_tone_evaluator else None
         try:
             critic = critic_future.result()
             _note_fallback(ctx, "critic", "copy")
@@ -289,10 +299,12 @@ def _review(ctx: JobContext, draft: dict, product: dict, warned: set, attempt: i
         if not critic["passed"]:
             issues.append(f"Spec accuracy: {critic['feedback']}")
 
-    ctx.review["evaluator"] = evaluation
-    if evaluation.get("degraded") and "evaluator" not in warned:
-        ctx.warn("copy", "AI tone evaluation unavailable; only the banned-word check ran.")
-        warned.add("evaluator")
+    if evaluation is not None:
+        ctx.review["evaluator"] = evaluation
+        if evaluation.get("degraded") and "evaluator" not in warned:
+            ctx.warn("copy", "AI tone evaluation unavailable; only the banned-word check ran.")
+            warned.add("evaluator")
+        # Banned words were already checked above; this only adds the tone assessment.
 
     return issues
 

@@ -46,6 +46,22 @@ class Settings(BaseSettings):
     llm_fallback_api_key: str = ""
     llm_fallback_model: str = ""
 
+    # --- Which LLM calls the pipeline makes -------------------------------------------
+    # Each of these costs one round trip (~5-12 s on a free model) and is off by default
+    # because measurement showed it buys little. Turn one on to compare with
+    # `python -m scripts.benchmark`, and see docs/PIPELINE.md for the reasoning.
+
+    # Segment/budget tier from an LLM instead of the rules in app/ai/profile.py. The rules use
+    # the same inputs (hobbies, income, family size) and are deterministic and instant.
+    use_llm_profile: bool = False
+    # A separate call that outlines the brochure sections before the writer writes them. The
+    # outline only ever feeds the writer, which can structure the copy itself.
+    use_llm_planner: bool = False
+    # An LLM tone/readability score alongside the critic. Its verdict never affects whether a
+    # draft is approved - only the deterministic banned-word scan and the spec checks do - so
+    # it is a call whose result is merely reported.
+    use_llm_tone_evaluator: bool = False
+
     # Chat-model call limits. Kept tight on purpose: every step has its own fallback, so a
     # hung provider should fail over quickly rather than hold the request for minutes.
     llm_timeout_seconds: float = 60.0

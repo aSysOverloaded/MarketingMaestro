@@ -142,3 +142,24 @@ def test_rate_limited_batches_wait_and_retry(monkeypatch):
     assert slept == [23]  # provider's own retry_delay + a margin
     assert vectors[0][0] == 0.3  # real vectors, not the mock fallback
     assert search.diagnostics.get_status("embeddings")["mode"] == "real"
+
+
+def test_query_embeddings_give_up_quickly(monkeypatch):
+    """A query embedding runs while the user waits: retry once, briefly, then degrade. Ingest
+    (test above) waits much longer because it is a one-off cost and mock pages stay wrong."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "gemini_api_key", "test-key")
+    monkeypatch.setattr(search.genai, "configure", lambda **kw: None)
+    slept = []
+    monkeypatch.setattr(search.time, "sleep", slept.append)
+
+    def always_rate_limited(**kw):
+        raise RuntimeError("429 quota exceeded ... retry_delay { seconds: 45 }")
+
+    monkeypatch.setattr(search.genai, "embed_content", always_rate_limited)
+
+    vector = search.embed_text("gear for camping", is_query=True)
+    assert slept == [search.MAX_QUERY_WAIT_SECONDS]  # capped, not the provider's 45s
+    assert vector == [0.1] * search.VECTOR_DIMENSION  # degraded, and reported as mock
+    assert search.diagnostics.get_status("embeddings")["mode"] == "mock"

@@ -64,12 +64,14 @@ another free model; `docs/IMPROVEMENTS.md` records which ones worked and when.
 
 ## How a request flows
 
+Summary below; [docs/PIPELINE.md](docs/PIPELINE.md) explains each phase and the reasoning.
+
 `POST /api/recommend` (form fields + optional catalog PDF) starts a background job and returns `202 {job_id, status_url}`; poll `GET /api/jobs/{job_id}` for per-step progress and, when `status` is `done`, the `result`. Steps:
 
 1. **Ingest** the PDF: page text is embedded (Gemini) into an on-disk Qdrant index (`storage/qdrant`); page images are saved. Without a PDF, the previously indexed catalog is reused (it survives restarts); `DELETE /api/rag/catalog` forgets it. The app is single-user by design: one catalog at a time.
-2. **profile** – LLM assigns a segment and budget tier (rule-based fallback).
+2. **profile** – deterministic rules assign a segment and budget tier (`USE_LLM_PROFILE=true` for an LLM call instead).
 3. **recommend** – one retrieval query per hobby, LLM extracts products from the matched pages, LLM ranks them (rule-based scoring fallback). Ranking reasons citing terms absent from the specs and customer profile are removed.
-4. **plan** – LLM outlines the brochure sections.
+4. **plan** – skipped by default; the writer structures the copy itself (`USE_LLM_PLANNER=true` for a separate outline call).
 5. **copy** – LLM writes the copy; a deterministic spec-term check, the spec critic and the evaluator review it; rejected drafts are revised with the reviewer's feedback (up to 2 revisions), else claim-free generic copy is used.
 6. **html** – Jinja2 template → `storage/temp_brochures/`.
 7. **pdf** – headless Chromium via Playwright → `storage/generated_brochures/`.
@@ -91,4 +93,6 @@ logged to `storage/sent_emails/`.
 | `app/delivery/email.py` | SMTP delivery |
 | `templates/brochure.html` | The brochure template |
 
+**How it works and why** - each phase, its cost, which LLM calls exist and which were
+deliberately removed: [docs/PIPELINE.md](docs/PIPELINE.md).
 Change history and the open backlog: [docs/IMPROVEMENTS.md](docs/IMPROVEMENTS.md).

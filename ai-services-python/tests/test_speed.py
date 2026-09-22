@@ -1,8 +1,11 @@
 """The copy step's speed optimisations, verified with fake LLMs that just sleep."""
 import time
 
+import pytest
+
 import app.pipeline.brochure as brochure
 from app.catalog import CustomerInput
+from app.config import settings
 
 CUSTOMER = CustomerInput(age=40, income=90000, family_size=3, hobbies=["camping"], location="Denver, CO")
 GROUNDED = {"headline": "H", "subheadline": "S", "paragraphs": ["Triple Cooling System keeps food fresh."], "cta": "C"}
@@ -13,6 +16,12 @@ def run():
     ctx = brochure.JobContext(job_id="job_" + "0" * 32, trace_id="t", customer=CUSTOMER)
     brochure.build_workflow().run(ctx)
     return ctx
+
+
+@pytest.fixture(autouse=True)
+def tone_evaluator_on(monkeypatch):
+    """These tests are about the review's shape, so they run with every reviewer enabled."""
+    monkeypatch.setattr(settings, "use_llm_tone_evaluator", True)
 
 
 def _fake_reviewers(monkeypatch, calls):
@@ -92,3 +101,37 @@ def test_banned_words_trigger_a_revision_without_llm_calls(no_llm, monkeypatch):
     ctx = run()
     assert "cheap" in feedback_seen[1]
     assert ctx.copy == GROUNDED and sorted(calls) == ["critic", "evaluator"]
+
+
+def test_optional_llm_calls_are_off_by_default(no_llm, monkeypatch):
+    """Profile, planner and tone evaluator are deliberate omissions, not failures: no LLM
+    call, no warning, and the copy still gets written and fact-checked."""
+    monkeypatch.setattr(settings, "use_llm_tone_evaluator", False)
+    calls = []
+    _fake_reviewers(monkeypatch, calls)
+    _fake_writer(monkeypatch, [GROUNDED])
+
+    ctx = run()
+    assert calls == ["critic"]  # evaluator not called
+    assert ctx.profile.segment == "Adventure" and not any(w["step"] == "profile" for w in ctx.warnings)
+    assert ctx.sections == [] and not any(w["step"] == "plan" for w in ctx.warnings)
+    assert ctx.copy == GROUNDED  # still written and reviewed
+    assert "evaluator" not in ctx.review
+
+
+def test_banned_words_are_still_enforced_without_the_tone_evaluator(no_llm, monkeypatch):
+    monkeypatch.setattr(settings, "use_llm_tone_evaluator", False)
+    calls = []
+    _fake_reviewers(monkeypatch, calls)
+    feedback_seen = []
+    drafts = iter([{**GROUNDED, "headline": "Cheap and cheerful"}, GROUNDED])
+
+    def writer(*a, feedback="", **k):
+        feedback_seen.append(feedback)
+        return next(drafts)
+
+    monkeypatch.setattr(brochure, "generate_copy", writer)
+    monkeypatch.setattr(brochure, "rank_products", lambda customer, seg, tier, cands, job_id: brochure.score_products(customer, cands[:1], job_id))
+
+    ctx = run()
+    assert "cheap" in feedback_seen[1] and ctx.copy == GROUNDED

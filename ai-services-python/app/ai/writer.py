@@ -12,7 +12,7 @@ logger = logging.getLogger("ai.writer")
 PROMPT = ChatPromptTemplate.from_template(
     """You are a professional copywriter agent. Write persuasive copy for a personalized marketing brochure.
 Customer Segment: {segment}
-Brochure Outline: {sections}
+Brochure Outline (if "none", choose a sensible structure yourself): {sections}
 Product Specifications: {candidate}
 
 Write a headline, subheadline, body paragraphs expanding on the planner outline points and product
@@ -32,7 +32,7 @@ Reviewer feedback on the previous draft (address every point; "none" means this 
 def generate_copy(segment: str, sections: list, candidate: dict, job_id: str = "unknown", feedback: str = "") -> dict:
     parsed = invoke_structured("writer", PROMPT, WriterOutput, {
         "segment": segment,
-        "sections": json.dumps(sections),
+        "sections": json.dumps(sections) if sections else "none",
         "candidate": json.dumps(candidate),
         "feedback": feedback or "none",
     }, job_id)

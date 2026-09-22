@@ -80,6 +80,7 @@ def test_pipeline_warns_when_the_backup_answered(with_fallback, monkeypatch):
     import app.pipeline.brochure as brochure
     from app.catalog import CustomerInput
 
+    monkeypatch.setattr(settings, "use_llm_profile", True)
     _stub(monkeypatch, {"primary": RuntimeError("503"), "fallback": ANSWER})
     ctx = brochure.JobContext(job_id="job_" + "0" * 32, trace_id="t",
                               customer=CustomerInput(age=40, income=90000, family_size=3, hobbies=["camping"], location="Denver"))

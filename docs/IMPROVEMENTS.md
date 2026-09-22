@@ -8,6 +8,55 @@ Open items that have been identified but not yet done live in [Backlog](#backlog
 
 ---
 
+## 2026-09-23 — Fewer LLM calls per run (3 optional calls off by default)
+
+Measurement showed a run is ~5.4k tokens but 5+ round trips, so **the cost of a run is the
+number of calls, not their size**. Three calls were earning little:
+
+| Removed from the default path | Why | Restore with |
+|---|---|---|
+| **profile** (segment + budget tier) | Rules in `app/ai/profile.py` use the same inputs (hobbies, income, family size), are instant and deterministic, and cannot invent a segment | `USE_LLM_PROFILE=true` |
+| **planner** (section outline) | The outline only ever fed the writer, which can structure copy itself | `USE_LLM_PLANNER=true` |
+| **tone evaluator** | Its verdict never affected approve/revise - only the banned-word scan and the spec checks do. It was also the slowest reviewer (~11.5 s) | `USE_LLM_TONE_EVALUATOR=true` |
+
+They are **switches, not deletions**, so each decision can be re-tested with the benchmark.
+Reasoning is documented at the point of use: `docs/PIPELINE.md`, `app/config.py` and
+`.env.example`.
+
+**Per run now:** extractor (with a catalog) + ranker + writer + critic per draft = 3-4 calls,
+down from 7 in the original Go pipeline and 5 before this change.
+
+### Benchmark: honest result
+Deterministic gains (120-page catalog, per run):
+
+| | before | after |
+|---|---|---|
+| LLM calls (writer/critic pair + extractor + ranker) | 5 | **2 + extractor/ranker** |
+| input tokens | 4,020 | **2,581** |
+| profile + planner + evaluator tokens | 891 | **0** |
+| generic copy / unsupported claims | 0 / 0 | **0 / 0** |
+
+**Wall-clock is NOT a clean comparison and should not be quoted as one.** Medians came out
+worse (54.6 s → 130.4 s) for reasons unrelated to the change: the earlier runs used *mock*
+embeddings (the quota had failed), these used real ones; n=2; and one run spent ~2 minutes
+waiting on embedding rate limits during retrieval. Individual clean run: 53.6 s with 2 LLM
+calls. A fair speed comparison needs a re-run on fresh quota.
+
+### Query embeddings no longer stall a run
+The ingest rate-limit retry (previous entry) also applied to *query* embeddings, so a search
+could block a live run for up to 60 s. Queries now retry once, capped at 10 s, then degrade to
+a mock vector (reported as usual); ingest keeps the long waits, because it is a one-off cost
+and mock pages stay wrong until the catalog is re-uploaded.
+
+- **Files:** `app/config.py`, `app/pipeline/brochure.py`, `app/ai/writer.py`,
+  `app/rag/search.py`, `.env.example`, `README.md`, `docs/PIPELINE.md` (new), tests
+- **Verified:** 47 tests. New: optional calls really are absent by default and produce no
+  warnings; banned words still enforced without the tone evaluator; query embeddings give up
+  quickly. Live: a 120-page ingest hit the rate limit, waited 29 s then 60 s, and completed
+  with `embeddings=real` - previously those pages silently held mock vectors.
+
+---
+
 ## 2026-09-23 — Large catalogs: batching, rate-limit retries, token accounting
 
 ### Large PDFs were quietly unusable
@@ -437,15 +486,18 @@ Identified but not yet done. Ordered roughly by priority.
 > named extracted images, publicly served `/storage`) is acceptable under this assumption, so
 > multi-user items are out of scope rather than backlog.
 
+- **PDF extraction is basic.** `pypdf` raw text only: scanned/image pages yield nothing (no
+  OCR), layout and spec tables are flattened, a page with several products is one chunk sharing
+  one hero image, extraction repeats every run instead of being cached per page, and retrieval
+  is vector-only (no keyword/BM25 hybrid). This is the weakest part of the pipeline for real
+  designed catalogs.
 - **Generic invented claims still rely on the LLM critic.** The grounding check catches
   branded names, acronyms and numbers. Plain-language additions like "get alerts on your
   phone" still depend on the critic.
 - **Critic and writer only see the top product**, while the brochure shows up to 4.
-- **The copy step is still the largest single step** (31.7 s of a 120.9 s run; writer ~16 s per
-  draft on Gemini flash-lite); the review is now parallel, and skipped when the instant checks already failed a
-  draft. Remaining options: a faster writer model, fewer revisions on the free tier, or
-  dropping the LLM tone evaluator. Its score never affects the approve/revise decision; only
-  the deterministic banned-word scan does, so it costs about 1.3 calls per run for nothing.
+- **Re-run the speed benchmark on fresh quota.** The last comparison was confounded by mock
+  vs real embeddings and rate-limit waits; the call-count and token reductions are solid but
+  the wall-clock gain is unmeasured.
 - **Free-tier daily request cap.** OpenRouter's free models allow a limited number of requests
   per day unless the account has credits. Now mitigated rather than solved: it is the backup
   provider, and Gemini's free tier is primary.

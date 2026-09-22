@@ -15,7 +15,8 @@ def run(ctx=None):
 def test_offline_run_completes_and_reports_every_fallback(no_llm):
     ctx = run()
     steps = {w["step"] for w in ctx.warnings}
-    assert {"profile", "recommend", "plan", "copy", "pdf"} <= steps
+    # profile and plan make no LLM call by default (see docs/PIPELINE.md), so they cannot fail
+    assert {"recommend", "copy", "pdf"} <= steps
     assert ctx.profile.segment == "Adventure"  # rule-based, from the "camping" hobby
     assert ctx.copy == brochure.fallback_copy("Adventure")
     assert ctx.html_path.is_file() and ctx.pdf_path is None
