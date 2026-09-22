@@ -27,7 +27,9 @@ class PlannerOutput(BaseModel):
 class WriterOutput(BaseModel):
     headline: str = Field(description="A short, catchy, benefit-driven headline")
     subheadline: str = Field(description="A supporting subheadline highlighting suitability")
-    paragraphs: List[str] = Field(description="Paragraphs expanding on the planner outline and product specifications")
+    # Rendered on a fixed-height A4 cover page with overflow hidden - long copy gets clipped
+    # silently, so keep this short. Go also caps the count at maxCoverParagraphs.
+    paragraphs: List[str] = Field(description="2 to 3 short paragraphs (each under 60 words) expanding on the planner outline and product specifications")
     cta: str = Field(description="Action-oriented CTA text")
 
 

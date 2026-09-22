@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 
 from langchain_core.prompts import ChatPromptTemplate
 
@@ -29,7 +30,9 @@ def _deterministic_banned_word_scan(copy: dict) -> list:
     paragraphs = " ".join(copy.get("paragraphs", [])).lower()
     cta = copy.get("cta", "").lower()
     full_text = f"{headline} {subheadline} {paragraphs} {cta}"
-    return [w for w in BANNED_WORDS if w in full_text]
+    # Whole-word match only: a plain substring check flagged "affordable" as containing
+    # "ford" and hard-failed the whole workflow on perfectly normal budget-focused copy.
+    return [w for w in BANNED_WORDS if re.search(rf"\b{re.escape(w)}\b", full_text)]
 
 
 def evaluate_copy(copy: dict, job_id: str = "unknown") -> dict:

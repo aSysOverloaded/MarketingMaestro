@@ -59,15 +59,6 @@ func (s *EmailDispatchStep) Execute(ctx *workflow.Context) (workflow.Result, err
 		return nil, fmt.Errorf("invalid PDF filepath type mapping")
 	}
 
-	pdfResRaw, ok := ctx.State.StepOutputs["PDFRenderStep"]
-	if !ok {
-		return nil, fmt.Errorf("missing PDF render metadata result")
-	}
-	pdfRes, ok := pdfResRaw.(workflow.PDFRenderResult)
-	if !ok {
-		return nil, fmt.Errorf("invalid PDF render metadata result format")
-	}
-
 	// Validate file existence
 	fileInfo, err := os.Stat(pdfPath)
 	if err != nil {
@@ -79,7 +70,6 @@ func (s *EmailDispatchStep) Execute(ctx *workflow.Context) (workflow.Result, err
 	smtpPort := os.Getenv("SMTP_PORT")
 	smtpUser := os.Getenv("SMTP_USER")
 	smtpPass := os.Getenv("SMTP_PASS")
-	apiKey := os.Getenv("SENDGRID_API_KEY")
 
 	var receiptID string
 	var sentMethod string
@@ -101,18 +91,14 @@ func (s *EmailDispatchStep) Execute(ctx *workflow.Context) (workflow.Result, err
 			log.Printf("[TraceID: %s] [JobID: %s] [Email] Successfully sent SMTP email to %s.", ctx.TraceID, ctx.JobID, recipient)
 			liveSent = true
 		}
-	} else if apiKey != "" {
-		// Mock live dispatcher using SendGrid config
-		sentMethod = "SendGrid Transaction API"
-		receiptID = fmt.Sprintf("sg_tx_rec_%s_%d", ctx.JobID, time.Now().Unix())
-		log.Printf("[TraceID: %s] [JobID: %s] [Email] Sending live email via SendGrid to %s with attachment: %s", 
-			ctx.TraceID, ctx.JobID, recipient, pdfRes.PDFObjectKey)
-		liveSent = true
 	}
+	// There is intentionally no SendGrid branch: one used to exist that logged a "live" send and
+	// reported success without ever calling the SendGrid API. Add a real integration before
+	// reintroducing it.
 
 	if !liveSent {
 		// Fallback/Default Local mock logging
-		sentMethod = "Local Storage Simulation (No SMTP or SENDGRID configuration found)"
+		sentMethod = "Local Storage Simulation (SMTP not configured or failed)"
 		receiptID = fmt.Sprintf("mock_tx_rec_%s_%d", ctx.JobID, time.Now().Unix())
 		
 		if err := os.MkdirAll(s.outputDir, 0755); err != nil {
@@ -139,7 +125,7 @@ func (s *EmailDispatchStep) Execute(ctx *workflow.Context) (workflow.Result, err
 
 	return workflow.EmailDispatchResult{
 		EmailReceiptID: receiptID,
-		Sent:           true,
+		Sent:           liveSent, // false when only logged locally - callers must not treat that as delivered
 	}, nil
 }
 

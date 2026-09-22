@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"marketing-agent/internal/recommendation"
@@ -123,9 +124,16 @@ func (s *CompileHTMLStep) Execute(ctx *workflow.Context) (workflow.Result, error
 							capacityStr = capVal
 						}
 
+						// Extraction sets base_price to 0 when the catalog states no price; render
+						// that as "on request" in the template rather than printing "$0.00".
+						priceStr := ""
+						if spec.BasePrice > 0 {
+							priceStr = fmt.Sprintf("%.2f", spec.BasePrice)
+						}
+
 						prod = templateProductSpec{
 							Model:      spec.Model,
-							BasePrice:  fmt.Sprintf("%.2f", spec.BasePrice),
+							BasePrice:  priceStr,
 							HeroImage:  spec.HeroImage,
 							Seats:      seats,
 							Horsepower: 0,
@@ -243,11 +251,7 @@ func (s *CompileHTMLStep) Execute(ctx *workflow.Context) (workflow.Result, error
 			TraceID string
 		}
 		Recommendations []recommendationItem
-		Copy            struct {
-			Headline    string
-			Subheadline string
-			CTAText     string
-		}
+		Copy            copyBlock
 	}{
 		Brand: globalBrand,
 		User: struct {
@@ -384,6 +388,11 @@ func (s *CompileHTMLStep) getProductSpecByID(id string) templateProductSpec {
 	}
 }
 
+// lgBrandPattern matches "LG" only as a standalone word. The previous substring checks for
+// "lg", "wash" and "dryer" branded any dishwasher (e.g. "Bosch 800 Series Dishwasher") as LG,
+// since product categories are not brands.
+var lgBrandPattern = regexp.MustCompile(`\blg\b`)
+
 // getBrandConfigByModel maps brand styling configurations deterministically
 func (s *CompileHTMLStep) getBrandConfigByModel(model string) struct {
 	Name           string
@@ -428,7 +437,7 @@ func (s *CompileHTMLStep) getBrandConfigByModel(model string) struct {
 			SecondaryColor: "#000000",
 			Initial:        "S",
 		}
-	} else if strings.Contains(lowerModel, "lg") || strings.Contains(lowerModel, "wash") || strings.Contains(lowerModel, "dryer") {
+	} else if lgBrandPattern.MatchString(lowerModel) {
 		return struct {
 			Name           string
 			PrimaryColor   string
@@ -455,41 +464,32 @@ func (s *CompileHTMLStep) getBrandConfigByModel(model string) struct {
 	}
 }
 
-// resolveMarketingCopy selects generated copy or applies a fallback copy layout by user segment
-func (s *CompileHTMLStep) resolveMarketingCopy(ctx *workflow.Context, segment string) struct {
+// maxCoverParagraphs caps writer body copy on the cover page, which is a fixed-height A4
+// page with overflow hidden - anything past this would be clipped silently in the PDF.
+const maxCoverParagraphs = 3
+
+// copyBlock is the marketing copy rendered on the brochure cover page
+type copyBlock struct {
 	Headline    string
 	Subheadline string
+	Paragraphs  []string // writer body copy; empty for the deterministic segment fallbacks
 	CTAText     string
-} {
+}
+
+// resolveMarketingCopy selects generated copy or applies a fallback copy layout by user segment
+func (s *CompileHTMLStep) resolveMarketingCopy(ctx *workflow.Context, segment string) copyBlock {
 	// Check if dynamic AI copy writer step output is present
 	if writerRaw, ok := ctx.State.StepOutputs["WriterStep"]; ok {
 		if writerRes, ok := writerRaw.(WriterResult); ok {
-			return struct {
-				Headline    string
-				Subheadline string
-				CTAText     string
-			}{
+			paragraphs := writerRes.Paragraphs
+			if len(paragraphs) > maxCoverParagraphs {
+				paragraphs = paragraphs[:maxCoverParagraphs]
+			}
+			return copyBlock{
 				Headline:    writerRes.Headline,
 				Subheadline: writerRes.Subheadline,
+				Paragraphs:  paragraphs,
 				CTAText:     writerRes.CTA,
-			}
-		}
-	}
-
-	// First check if AI copy is available in step outputs
-	if copyRaw, ok := ctx.State.StepOutputs["CopywriterStep"]; ok {
-		if copyResult, ok := copyRaw.(workflow.GeneratedCopyResult); ok {
-			headline := copyResult.CopyData["headline"]
-			subheadline := copyResult.CopyData["subheadline"]
-			cta := copyResult.CopyData["cta"]
-			return struct {
-				Headline    string
-				Subheadline string
-				CTAText     string
-			}{
-				Headline:    headline,
-				Subheadline: subheadline,
-				CTAText:     cta,
 			}
 		}
 	}
@@ -497,31 +497,19 @@ func (s *CompileHTMLStep) resolveMarketingCopy(ctx *workflow.Context, segment st
 	// Fallback copy structures per segment
 	switch strings.ToLower(segment) {
 	case "adventure", "adventure family":
-		return struct {
-			Headline    string
-			Subheadline string
-			CTAText     string
-		}{
+		return copyBlock{
 			Headline:    "Innovative Living & Performance",
 			Subheadline: "Engineered to elevate your daily experience.",
 			CTAText:     "Designed with advanced technology and premium materials, these options deliver top-tier efficiency and modern control. Schedule a live demonstration or contact a sales specialist to learn more.",
 		}
 	case "family", "family safety":
-		return struct {
-			Headline    string
-			Subheadline string
-			CTAText     string
-		}{
+		return copyBlock{
 			Headline:    "Reliability & Comfort Redefined",
 			Subheadline: "Built around your family's daily needs.",
 			CTAText:     "Offering spacious capacities, quiet operation, and certified reliability, this selection ensures every daily routine runs smoothly. Contact us to learn more or request a product demo.",
 		}
 	default:
-		return struct {
-			Headline    string
-			Subheadline string
-			CTAText     string
-		}{
+		return copyBlock{
 			Headline:    "Premium Quality & Design",
 			Subheadline: "Sophisticated style meets high-efficiency features.",
 			CTAText:     "Experience a selection curated for premium performance, elegant aesthetics, and modern convenience features. Schedule a live demo or contact our sales support for details.",

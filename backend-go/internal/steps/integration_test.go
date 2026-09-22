@@ -17,16 +17,14 @@ func TestFullMVPWorkflowExecution(t *testing.T) {
 		t.Fatalf("Failed to resolve current working directory: %v", err)
 	}
 
-	// Paths relative to backend-go/internal/steps directory
+	// Templates are read from the real repo path; all outputs go to a per-test temp dir.
+	// These used to point at the real backend-go/storage/* dirs and os.RemoveAll them,
+	// so running the test wiped every brochure the dev server had generated.
 	templatesDir := filepath.Join(baseDir, "..", "..", "templates")
-	tempHtmlDir := filepath.Join(baseDir, "..", "..", "storage", "temp_brochures")
-	tempPdfDir := filepath.Join(baseDir, "..", "..", "storage", "generated_brochures")
-	tempEmailDir := filepath.Join(baseDir, "..", "..", "storage", "sent_emails")
-
-	// Ensure clean testing workspace
-	os.RemoveAll(tempHtmlDir)
-	os.RemoveAll(tempPdfDir)
-	os.RemoveAll(tempEmailDir)
+	outRoot := t.TempDir()
+	tempHtmlDir := filepath.Join(outRoot, "temp_brochures")
+	tempPdfDir := filepath.Join(outRoot, "generated_brochures")
+	tempEmailDir := filepath.Join(outRoot, "sent_emails")
 
 	// 2. Initialize Steps
 	stepProfile := NewUserProfileStep()
@@ -95,12 +93,5 @@ func TestFullMVPWorkflowExecution(t *testing.T) {
 	emailFile := filepath.Join(tempEmailDir, "email_job_job_integration_1.log")
 	if _, err := os.Stat(emailFile); os.IsNotExist(err) {
 		t.Errorf("Mock email dispatch log file was not created: %s", emailFile)
-	}
-
-	// 8. Clean up created artifacts after successful validation
-	if !t.Failed() {
-		os.RemoveAll(tempHtmlDir)
-		os.RemoveAll(tempPdfDir)
-		os.RemoveAll(tempEmailDir)
 	}
 }

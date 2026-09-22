@@ -85,12 +85,22 @@ func (s *ProductRecommenderStep) Execute(ctx *workflow.Context) (workflow.Result
 		famSize = fsInt
 	}
 
+	// Age and location used to be hardcoded (32 / "Seattle, WA") here, so the ranking prompt
+	// ignored what the user actually submitted for those two fields.
+	ageVal := 0
+	if a, ok := profileResult.Attributes["age"].(float64); ok {
+		ageVal = int(a)
+	} else if aInt, ok := profileResult.Attributes["age"].(int); ok {
+		ageVal = aInt
+	}
+	locationVal, _ := profileResult.Attributes["location"].(string)
+
 	userProfile := recommendation.UserProfile{
-		Age:        32,
+		Age:        ageVal,
 		Income:     incomeVal,
 		Hobbies:    hobbiesSlice,
 		FamilySize: famSize,
-		Location:   "Seattle, WA",
+		Location:   locationVal,
 	}
 
 	// 2. Fetch candidates catalog (RAG or cache resolution)
@@ -201,6 +211,7 @@ Candidate Catalog:
 
 For each recommended product, calculate:
 - A match score (0 to 100) based on budget suitability, capacity/size requirements, active hobbies vs product features, and segment fit.
+  A base_price of 0 means the price is unknown (not free) - do not claim it fits the budget, score it on the other criteria.
 - Matched rules: specific, concise reasons why it matches (e.g. "Fits budget", "Large capacity fits family size").
 - Explanation: a 1-sentence summary of why this product is recommended for the user.
 
@@ -393,13 +404,16 @@ For each item, respond with a JSON object matching this structure:
   "colors": ["Color 1", "Color 2"],
   "page_number": X // Keep the page number integer from the matched section title (e.g. 3 if matching --- PAGE 3 ---)
 }
-If pricing or specific specs are not listed, make a highly accurate estimate.
-
-IMPORTANT: You MUST produce at least one item per matched page below, even if the page reads
-like marketing copy rather than a clean spec sheet. If no distinct product name is stated,
-infer the product category from context (hobbies, imagery cues, section headings) and use that
-as the model name (e.g. "Trekking Backpack" or "Camping Tent Package") rather than omitting the
-page. Never return an empty array - a best-effort estimate is always preferred over nothing.
+IMPORTANT - extract only what the pages actually state. Everything you output is printed in a
+customer-facing brochure and used as the ground truth the copy is audited against, so an
+invented value becomes a false claim to a customer:
+- If a price is not explicitly stated, set "base_price" to 0. Never estimate a price.
+- Only include features, specs and colors that are written on the page. Omit any spec key
+  that is not stated rather than guessing it.
+- If a page describes a product without a distinct model name, you may use the page's own
+  heading or the product category it names as the model name, but do not add details to it.
+- If a page describes no product at all, skip it. Returning fewer items (or an empty array)
+  is correct when the pages do not describe products.
 
 Matched Pages Content:
 %s

@@ -60,9 +60,15 @@
                 <h3 class="text-base font-medium text-gray-500 italic">
                     {{.Copy.Subheadline}}
                 </h3>
+                {{if .Copy.Paragraphs}}
+                {{range .Copy.Paragraphs}}
+                <p class="text-gray-600 text-sm leading-relaxed">{{.}}</p>
+                {{end}}
+                {{else}}
                 <p class="text-gray-600 text-sm leading-relaxed">
                     Hello Valued Customer, based on your preferences, budget parameters, and lifestyle markers, we have curated a tailored recommendation of the top options matching your daily needs. Below is a comparative overview of your matched recommendations.
                 </p>
+                {{end}}
             </div>
 
             <!-- Comparison Table -->
@@ -75,7 +81,7 @@
                             <span class="h-6 w-6 rounded-full bg-blue-100 text-blue-800 font-bold text-xs flex items-center justify-center">{{add $index 1}}</span>
                             <div>
                                 <h4 class="font-bold text-gray-800 text-sm">{{$item.Product.Model}}</h4>
-                                <p class="text-xs text-gray-400">Starting from ${{$item.Product.BasePrice}}</p>
+                                <p class="text-xs text-gray-400">{{if $item.Product.BasePrice}}Starting from ${{$item.Product.BasePrice}}{{else}}Price on request{{end}}</p>
                             </div>
                         </div>
                         <div class="text-right">
@@ -87,6 +93,13 @@
                     {{end}}
                 </div>
             </div>
+
+            {{if .Copy.CTAText}}
+            <!-- Call to Action -->
+            <div class="rounded-2xl p-5 text-white text-sm font-semibold leading-relaxed" style="background-color: {{.Brand.PrimaryColor}};">
+                {{.Copy.CTAText}}
+            </div>
+            {{end}}
         </div>
 
         <!-- Footer -->
@@ -141,8 +154,8 @@
             <!-- 2. Specifications Grid -->
             <div class="grid grid-cols-3 gap-4">
                 <div class="bg-gray-50 p-3 rounded-xl border border-gray-100 text-center">
-                    <span class="text-[10px] text-gray-400 font-semibold uppercase tracking-wider block">Estimated Price</span>
-                    <span class="text-sm font-bold text-gray-800">${{$item.Product.BasePrice}}</span>
+                    <span class="text-[10px] text-gray-400 font-semibold uppercase tracking-wider block">Price</span>
+                    <span class="text-sm font-bold text-gray-800">{{if $item.Product.BasePrice}}${{$item.Product.BasePrice}}{{else}}On request{{end}}</span>
                 </div>
                 {{if gt $item.Product.Horsepower 0}}
                 <div class="bg-gray-50 p-3 rounded-xl border border-gray-100 text-center">

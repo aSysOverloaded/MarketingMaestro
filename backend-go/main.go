@@ -161,7 +161,6 @@ func main() {
 		stepEvaluator := steps.NewEvaluatorStep()
 		stepCompile := steps.NewCompileHTMLStep(templatesDir, tempHtmlDir)
 		stepRender := steps.NewPDFRenderStep(tempPdfDir)
-		stepEmail := steps.NewEmailDispatchStep(tempEmailDir)
 
 		mvpWorkflow := workflow.Workflow{
 			Name: "PersonalizedBrochureMVP",
@@ -174,7 +173,10 @@ func main() {
 				stepEvaluator,
 				stepCompile,
 				stepRender,
-				stepEmail,
+				// No EmailDispatchStep here: delivery is an explicit user action via
+				// /api/send-email. Running it here too emailed every generated brochure
+				// (including to the "customer@example.com" form default) and double-sent
+				// once the user clicked Send.
 			},
 			RetryPolicies: map[string]workflow.RetryPolicy{
 				"UserProfileStep": {
