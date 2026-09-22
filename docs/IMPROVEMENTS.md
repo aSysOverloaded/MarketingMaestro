@@ -8,6 +8,52 @@ Open items that have been identified but not yet done live in [Backlog](#backlog
 
 ---
 
+## 2026-09-22 — Benchmark harness; faster review in the copy step
+
+### How speed is measured
+- New `scripts/benchmark.py` runs the real pipeline N times against the configured model, on
+  fixed customer profiles and the demo catalog, so every run sees the same input. It records
+  per-step times and per-call times inside the copy step (writer / critic / evaluator, via
+  the new `ctx.review["calls"]`). It also records the quality signals a speed change must not
+  worsen: revisions, generic-copy fallbacks, other fallbacks, and **unsupported terms in the
+  copy that actually shipped** (must stay 0). Results are saved to
+  `storage/benchmarks/<label>-<time>.json`, and `--compare a.json b.json` prints them side
+  by side. Free-model latency is noisy, so compare medians over several runs.
+- The logic of speed changes is tested offline in `tests/test_speed.py` with fake LLMs that
+  sleep, so it doesn't depend on API quota or provider load.
+
+### Baseline (before the changes below), `nex-agi/nex-n2.5-pro:free`
+Only 2 of 3 runs are valid. The 3rd hit OpenRouter's **free-models-per-day limit** (`429`) and
+fell back to generic copy.
+
+| | Run 1 | Run 2 |
+|---|---|---|
+| Total | 254 s | 166 s |
+| Copy step | 202 s | 101 s |
+| Draft 1: writer / critic / evaluator | 45 / 48 / 22 s | 23 / 13 / 4 s |
+| Draft 2: writer / critic / evaluator | 49 / 5 / 31 s | 32 / 19 / 6 s |
+
+The critic and evaluator ran sequentially, and the writer is the single biggest cost.
+
+### Changes
+- **Critic and evaluator run in parallel** (they are independent), so a review costs
+  max(critic, evaluator) instead of the sum. Projected from the baseline timings: about −27 s
+  on run 1 and −10 s on run 2.
+- **LLM reviews are skipped when the instant checks already rejected the draft.** Unsupported
+  spec terms or banned words mean the draft goes back to the writer either way, so an LLM
+  verdict on it is wasted time and quota. The banned-word scan (`evaluator.banned_words_in`,
+  formerly private) now runs first alongside the grounding check. Skips are counted in
+  `copy_review.skipped_llm_reviews`.
+- **Files:** `app/pipeline/brochure.py`, `app/ai/evaluator.py`, `scripts/benchmark.py` (new),
+  `tests/test_speed.py` (new), `tests/test_rules.py`
+- **Verified:** 35 tests. New ones cover a grounded draft reaching both reviewers, review wall
+  time being ~1× (not 2×) the LLM delay, LLM reviews skipped for a draft with an invented
+  "SmartThings app" and run for its grounded revision, and a banned word triggering a revision
+  with no LLM calls. **Live "after" benchmark pending:** the key hit the free daily request
+  limit.
+
+---
+
 ## 2026-09-22 — Real progress in the UI; working free model
 
 ### Real step-by-step progress
@@ -300,10 +346,14 @@ Identified but not yet done. Ordered roughly by priority.
   branded names, acronyms and numbers. Plain-language additions like "get alerts on your
   phone" still depend on the critic.
 - **Critic and writer only see the top product**, while the brochure shows up to 4.
-- **The copy step is ~80% of the run time.** Writing a draft takes ~25–60 s and fact-checking
-  one takes ~35 s, on the free model. Options: a faster model for the writer, running the
-  critic and evaluator in parallel (they're independent), or skipping the LLM critic when the
-  deterministic check already failed a draft.
+- **The copy step is still most of the run time.** The writer takes 23–49 s per draft on the
+  free model; the review is now parallel, and skipped when the instant checks already failed a
+  draft. Remaining options: a faster writer model, fewer revisions on the free tier, or
+  dropping the LLM tone evaluator. Its score never affects the approve/revise decision; only
+  the deterministic banned-word scan does, so it costs about 1.3 calls per run for nothing.
+- **Free-tier daily request cap.** OpenRouter's free models allow a limited number of requests
+  per day unless the account has credits (the `429` message says 10 credits unlock 1000/day).
+  A run makes about 8 LLM calls, so the cap limits both usage and benchmarking.
 - **UI text sizes are wrong in places.** `static/index.html` uses Tailwind arbitrary-size
   classes (`text-[10px]` and similar) that the Tailwind 2.2 CDN build doesn't support, so those
   labels render at the default size.

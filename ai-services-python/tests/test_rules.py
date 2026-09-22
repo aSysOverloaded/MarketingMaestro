@@ -2,7 +2,7 @@
 import pytest
 
 import app.ai.ranker as ranker
-from app.ai.evaluator import _deterministic_banned_word_scan as banned
+from app.ai.evaluator import banned_words_in as banned
 from app.ai.profile import rule_based_profile
 from app.ai.schemas import RankedItem, RankingOutput
 from app.catalog import DEFAULT_CATALOG, CustomerInput, Product

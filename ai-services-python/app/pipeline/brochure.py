@@ -6,13 +6,16 @@ Go version this replaces fell back silently at almost every step (canned profile
 catalog, auto-passed critic, mock PDF) while still reporting success.
 """
 import logging
+import time
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from app import diagnostics
 from app.ai.critic import audit_copy
-from app.ai.evaluator import evaluate_copy
+from app.ai.evaluator import banned_words_in, evaluate_copy
 from app.ai.extractor import extract_products
 from app.ai.grounding import find_ungrounded_in_text, find_ungrounded_terms
 from app.ai.planner import generate_plan
@@ -206,9 +209,26 @@ def plan_step(ctx: JobContext) -> None:
         ctx.warn("plan", f"AI content planner unavailable ({e}); used a default outline.")
 
 
-def _review(ctx: JobContext, draft: dict, product: dict, warned: set) -> List[str]:
-    """Run the grounding check, critic and evaluator on a draft; return the list of issues
-    (empty = approved)."""
+@contextmanager
+def _timed(ctx: JobContext, call: str, draft: int):
+    """Record how long one call inside the copy step took (ctx.review["calls"]), so the
+    benchmark can see where the copy step's time goes."""
+    start = time.monotonic()
+    try:
+        yield
+    finally:
+        ctx.review.setdefault("calls", []).append({"call": call, "draft": draft, "ms": int((time.monotonic() - start) * 1000)})
+
+
+def _review(ctx: JobContext, draft: dict, product: dict, warned: set, attempt: int = 1) -> List[str]:
+    """Review a draft; return the list of issues (empty = approved).
+
+    Order matters for speed. The deterministic checks run first and are instant. If they
+    already reject the draft, the LLM critic and evaluator are skipped: the draft goes back to
+    the writer either way, and their verdict on a draft about to be rewritten is wasted time.
+    Otherwise the critic and evaluator run in parallel - they are independent - so the review
+    costs max(critic, evaluator) instead of the sum.
+    """
     issues: List[str] = []
 
     # Deterministic, so it still runs when the LLM critic is down.
@@ -219,24 +239,44 @@ def _review(ctx: JobContext, draft: dict, product: dict, warned: set) -> List[st
             f"Not in the product specs, remove: {', '.join(ungrounded)}. "
             "Only mention features, apps, services and numbers that the specs list."
         )
+    banned = banned_words_in(draft)
+    if banned:
+        issues.append(f"Remove banned words: {', '.join(banned)}")
 
-    try:
-        critic = audit_copy(draft, product, job_id=ctx.job_id)
+    if issues:
+        ctx.review.setdefault("skipped_llm_reviews", 0)
+        ctx.review["skipped_llm_reviews"] += 1
+        return issues
+
+    def run_critic():
+        with _timed(ctx, "critic", attempt):
+            return audit_copy(draft, product, job_id=ctx.job_id)
+
+    def run_evaluator():
+        with _timed(ctx, "evaluator", attempt):
+            return evaluate_copy(draft, job_id=ctx.job_id)  # never raises
+
+    ctx.review.setdefault("calls", [])
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        critic_future = pool.submit(run_critic)
+        evaluation = pool.submit(run_evaluator).result()
+        try:
+            critic = critic_future.result()
+        except Exception as e:
+            critic = None
+            if "critic" not in warned:
+                ctx.warn("copy", f"Spec critic unavailable ({e}); only the deterministic spec-term check ran.")
+                warned.add("critic")
+
+    if critic is not None:
         ctx.review["critic"] = critic
         if not critic["passed"]:
             issues.append(f"Spec accuracy: {critic['feedback']}")
-    except Exception as e:
-        if "critic" not in warned:
-            ctx.warn("copy", f"Spec critic unavailable ({e}); only the deterministic spec-term check ran.")
-            warned.add("critic")
 
-    evaluation = evaluate_copy(draft, job_id=ctx.job_id)
     ctx.review["evaluator"] = evaluation
     if evaluation.get("degraded") and "evaluator" not in warned:
         ctx.warn("copy", "AI tone evaluation unavailable; only the banned-word check ran.")
         warned.add("evaluator")
-    if evaluation["banned_words_found"]:
-        issues.append(f"Remove banned words: {', '.join(evaluation['banned_words_found'])}")
 
     return issues
 
@@ -252,14 +292,15 @@ def copy_step(ctx: JobContext) -> None:
     for attempt in range(MAX_REVISIONS + 1):
         ctx.note(f"Writing draft {attempt + 1}" + (" (revising with reviewer feedback)" if attempt else ""))
         try:
-            draft = generate_copy(segment, ctx.sections, product, job_id=ctx.job_id, feedback=feedback)
+            with _timed(ctx, "writer", attempt + 1):
+                draft = generate_copy(segment, ctx.sections, product, job_id=ctx.job_id, feedback=feedback)
         except Exception as e:
             ctx.copy = fallback_copy(segment)
             ctx.warn("copy", f"AI copywriter unavailable ({e}); used generic copy.")
             return
 
         ctx.note(f"Fact-checking draft {attempt + 1}")
-        issues = _review(ctx, draft, product, warned)
+        issues = _review(ctx, draft, product, warned, attempt + 1)
         ctx.review["revisions"] = attempt
         if not issues:
             ctx.copy = draft

@@ -21,6 +21,9 @@ PDF rendering uses an installed Chrome or Edge. If neither is present, run
 
 Tests (offline, no API keys needed): `venv/Scripts/python -m pytest`
 
+Benchmark (real API calls, ~4 min per run): `venv/Scripts/python -m scripts.benchmark --label NAME --runs 3`,
+then `--compare storage/benchmarks/A.json storage/benchmarks/B.json` to compare speed and quality side by side.
+
 ## How a request flows
 
 `POST /api/recommend` (form fields + optional catalog PDF) starts a background job and returns `202 {job_id, status_url}`; poll `GET /api/jobs/{job_id}` for per-step progress and, when `status` is `done`, the `result`. Steps:

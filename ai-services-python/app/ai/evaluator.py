@@ -24,7 +24,7 @@ Rate the tone, grade the overall suitability score (0-100), and determine if it 
 )
 
 
-def _deterministic_banned_word_scan(copy: dict) -> list:
+def banned_words_in(copy: dict) -> list:
     headline = copy.get("headline", "").lower()
     subheadline = copy.get("subheadline", "").lower()
     paragraphs = " ".join(copy.get("paragraphs", [])).lower()
@@ -38,7 +38,7 @@ def _deterministic_banned_word_scan(copy: dict) -> list:
 def evaluate_copy(copy: dict, job_id: str = "unknown") -> dict:
     # Must never raise: the deterministic banned-word scan always runs, and the LLM tone
     # check degrades gracefully (reported via "degraded") instead of failing the review.
-    found_banned = _deterministic_banned_word_scan(copy)
+    found_banned = banned_words_in(copy)
 
     try:
         llm = get_chat_model("evaluator")
