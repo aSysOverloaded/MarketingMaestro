@@ -178,6 +178,60 @@ def embed_texts(texts: list, is_query: bool = False) -> list:
             diagnostics.set_status("embeddings", "real", None)
     return vectors
 
+# A line repeated on at least this share of pages is navigation/running header, not content.
+BOILERPLATE_PAGE_SHARE = 0.4
+MAX_BOILERPLATE_LINE_CHARS = 200
+
+
+def find_boilerplate_lines(page_texts: list) -> set:
+    """Lines that appear on a large share of pages: nav bars, running headers, page furniture.
+    They add nothing to retrieval and dilute every page's embedding towards the same centre."""
+    if len(page_texts) < 5:
+        return set()
+    counts = {}
+    for text in page_texts:
+        for line in {ln.strip() for ln in text.splitlines() if ln.strip()}:
+            if len(line) <= MAX_BOILERPLATE_LINE_CHARS:
+                counts[line] = counts.get(line, 0) + 1
+    threshold = max(2, int(len(page_texts) * BOILERPLATE_PAGE_SHARE))
+    return {line for line, n in counts.items() if n >= threshold}
+
+
+def strip_boilerplate(text: str, boilerplate: set) -> str:
+    return "\n".join(ln for ln in text.splitlines() if ln.strip() not in boilerplate).strip()
+
+
+def select_page_images(page, page_number: int, dest_dir: str) -> list:
+    """Save the largest MAX_IMAGES_PER_PAGE images of a page, biggest first.
+
+    Every image is measured before any is written: a catalogue page can carry dozens of images
+    (logos, colour swatches, icons), so taking the first ones that pass a size floor picks a
+    banner rather than the product. images[0] becomes the brochure's hero image.
+    """
+    candidates = []
+    for img_idx, img_file in enumerate(page.images):
+        if len(img_file.data) < MIN_IMAGE_BYTES:
+            continue  # icons/logos are never the hero image
+        try:
+            width, height = img_file.image.size
+            area = width * height
+        except Exception:
+            area = len(img_file.data)  # undecodable: byte size is a reasonable proxy
+        candidates.append((area, img_idx, img_file))
+
+    candidates.sort(key=lambda c: c[0], reverse=True)
+    paths = []
+    for area, img_idx, img_file in candidates[:MAX_IMAGES_PER_PAGE]:
+        ext = os.path.splitext(img_file.name)[1] if img_file.name else ".png"
+        if not ext or ext == ".":
+            ext = ".png"
+        name = f"page_{page_number}_img_{img_idx}{ext}"
+        with open(os.path.join(dest_dir, name), "wb") as f:
+            f.write(img_file.data)
+        paths.append(f"/storage/extracted_images/{name}")
+    return paths
+
+
 def ingest_pdf(pdf_bytes: bytes, job_id: str = "unknown", filename: str = "catalog.pdf") -> dict:
     content_hash = hashlib.sha256(pdf_bytes).hexdigest()
 
@@ -223,37 +277,12 @@ def ingest_pdf(pdf_bytes: bytes, job_id: str = "unknown", filename: str = "catal
         # brochure's hero image - is the most likely candidate to be the actual product
         # photo rather than a small decorative/lifestyle banner image that happens to be
         # placed first in the PDF's internal image order.
-        image_entries = []
         try:
-            for img_idx, img_file in enumerate(page.images):
-                if len(image_entries) >= MAX_IMAGES_PER_PAGE:
-                    break
-                if len(img_file.data) < MIN_IMAGE_BYTES:
-                    continue  # icons/logos are never the hero image
-                img_ext = os.path.splitext(img_file.name)[1] if img_file.name else ".png"
-                if not img_ext or img_ext == ".":
-                    img_ext = ".png"
-                img_name = f"page_{i+1}_img_{img_idx}{img_ext}"
-                dest_path = os.path.join(backend_storage, img_name)
-
-                with open(dest_path, "wb") as f:
-                    f.write(img_file.data)
-
-                area = 0
-                try:
-                    if img_file.image is not None:
-                        width, height = img_file.image.size
-                        area = width * height
-                except Exception:
-                    pass  # keep area=0 - falls to the end of the sort, not an extraction failure
-
-                image_entries.append((area, f"/storage/extracted_images/{img_name}"))
+            image_paths = select_page_images(page, i + 1, backend_storage)
         except Exception as e:
+            image_paths = []
             image_extract_failures += 1
             log_stage(logger, job_id, "ingest", f"failed to extract images on page {i+1}: {e}", level="warning")
-
-        image_entries.sort(key=lambda entry: entry[0], reverse=True)
-        image_paths = [path for _, path in image_entries]
 
         pages_to_embed.append(text)
         page_details.append({
@@ -262,7 +291,17 @@ def ingest_pdf(pdf_bytes: bytes, job_id: str = "unknown", filename: str = "catal
             "images": image_paths
         })
 
-    # 3. Create vector embeddings in exactly ONE batch request
+    # Drop repeated navigation/header lines before embedding, and keep the cleaned text as the
+    # page content the extractor later reads.
+    boilerplate = find_boilerplate_lines(pages_to_embed)
+    if boilerplate:
+        log_stage(logger, job_id, "ingest", f"stripping {len(boilerplate)} repeated line(s) of page furniture")
+        cleaned = [strip_boilerplate(t, boilerplate) for t in pages_to_embed]
+        for details, text in zip(page_details, cleaned):
+            details["content"] = text
+        pages_to_embed = cleaned
+
+    # 3. Create vector embeddings, in batches
     if pages_to_embed:
         vectors = embed_texts(pages_to_embed, is_query=False)
 

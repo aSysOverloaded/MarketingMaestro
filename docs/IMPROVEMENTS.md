@@ -8,6 +8,49 @@ Open items that have been identified but not yet done live in [Backlog](#backlog
 
 ---
 
+## 2026-09-23 — Ingest quality, diagnosed on a real 133-page catalogue
+
+New `scripts/inspect_catalog.py` reports what a PDF will actually give the pipeline (text per
+page, empty pages, dense pages, images, ingest cost) and recommends a strategy, before any
+embedding quota is spent. Run on a real 38 MB sports catalogue:
+
+| | |
+|---|---|
+| pages | 133 |
+| empty pages | **0** - text extraction works everywhere, so **no OCR needed** |
+| text per page | median 2106 chars, max 23306 |
+| dense pages (multi-product) | **95 (71%)** |
+| images | **2821, median 19 per page** |
+| prices | **none** - wholesale catalogue, product codes only |
+
+That contradicted the assumption that OCR was the missing piece. The real problems are
+granularity (one page holds several products), image choice (19 candidates per page) and
+flattened columns.
+
+### Fixed now
+- **Hero image is the largest image on the page again.** The batch-capping added earlier kept
+  the *first* 2 images over 4 KB, which on a 19-image page is a logo or banner. Every image is
+  now measured first and only the largest 2 are written (`select_page_images`, testable).
+- **Repeated page furniture is stripped before embedding.** Lines appearing on ≥40% of pages
+  (navigation bars, "Sports 2025", size charts) are removed from the indexed text: they add
+  nothing to retrieval and pull every page's embedding towards the same centre. On the real
+  catalogue it found 4 such lines, and page 54 now starts at the product name "GOLEM" instead
+  of the navigation bar.
+- **Files:** `app/rag/search.py`, `scripts/inspect_catalog.py` (new),
+  `tests/test_ingest_quality.py` (new)
+- **Verified:** 51 tests, 4 new (boilerplate detection and stripping, the short-document and
+  rare-line cases, largest-image selection with only the winners written, and the undecodable
+  image fallback). Boilerplate detection also checked against the real catalogue.
+
+### Still open for this catalogue (see Backlog)
+- **One page = one chunk** although 71% of pages hold several products, so products share an
+  entry and a hero image.
+- **Columns are flattened**: `pypdf` turns three columns into
+  `SOFTLOCK + MESH: 100% POLYESTERAvailable until 202880000274`. Layout-aware extraction
+  (pdfplumber/PyMuPDF word coordinates) would keep them apart.
+
+---
+
 ## 2026-09-23 — Fewer LLM calls per run (3 optional calls off by default)
 
 Measurement showed a run is ~5.4k tokens but 5+ round trips, so **the cost of a run is the
@@ -486,11 +529,19 @@ Identified but not yet done. Ordered roughly by priority.
 > named extracted images, publicly served `/storage`) is acceptable under this assumption, so
 > multi-user items are out of scope rather than backlog.
 
-- **PDF extraction is basic.** `pypdf` raw text only: scanned/image pages yield nothing (no
-  OCR), layout and spec tables are flattened, a page with several products is one chunk sharing
-  one hero image, extraction repeats every run instead of being cached per page, and retrieval
-  is vector-only (no keyword/BM25 hybrid). This is the weakest part of the pipeline for real
-  designed catalogs.
+- **PDF extraction: one page = one chunk.** Measured on a real catalogue, 71% of pages hold
+  several products, so they share one index entry and one hero image, and the extractor gets a
+  blob. Split pages into product blocks (a product code like `80000274` plus a name line is a
+  reliable boundary in that catalogue) and embed per block.
+- **PDF extraction: columns are flattened.** `pypdf` gives text in stream order, so adjacent
+  columns merge (`POLYESTERAvailable until 202880000274`). pdfplumber/PyMuPDF expose word
+  coordinates; clustering by x-position would keep product blocks apart and also let images be
+  matched to the product beside them.
+- **Extraction repeats every run** for the same matched pages; caching extracted products per
+  page (in the Qdrant payload) makes repeat runs skip it.
+- **Retrieval is vector-only.** No keyword/BM25 hybrid, so exact model codes match poorly.
+- **OCR** is still absent, but measured as *not* the bottleneck for this catalogue (0 empty
+  pages). Needed only for scanned catalogues.
 - **Generic invented claims still rely on the LLM critic.** The grounding check catches
   branded names, acronyms and numbers. Plain-language additions like "get alerts on your
   phone" still depend on the critic.
