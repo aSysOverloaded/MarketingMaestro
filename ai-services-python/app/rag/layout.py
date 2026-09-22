@@ -145,13 +145,25 @@ def segment_words(words: Sequence[dict]) -> List[Block]:
     return merged
 
 
-def assign_image_to_block(image: Dict, blocks: Sequence[Block]) -> Optional[int]:
-    """Index of the block an image belongs to: the one it sits inside, else the nearest."""
-    if not blocks:
+def image_for_block(images: Sequence[Dict], block: Block, min_area: float = 0.0) -> Optional[Dict]:
+    """The image belonging to a block, or None.
+
+    A catalogue sets the photo *beside* its text, not inside it: on the real catalogue's page 31
+    the balls sit at x -14..170 while their text blocks start at x 175. So the image whose
+    vertical span overlaps the block most wins, and ties go to the nearest horizontally.
+    """
+    def vertical_overlap(image) -> float:
+        return max(0.0, min(block.bottom, image["bottom"]) - max(block.top, image["top"]))
+
+    def horizontal_distance(image) -> float:
+        return abs((image["x0"] + image["x1"]) / 2 - (block.x0 + block.x1) / 2)
+
+    candidates = [im for im in images if area_of(im) >= min_area and vertical_overlap(im) > 0]
+    if not candidates:
         return None
-    cx = (image["x0"] + image["x1"]) / 2
-    cy = (image["top"] + image["bottom"]) / 2
-    for i, block in enumerate(blocks):
-        if block.contains(cx, cy):
-            return i
-    return min(range(len(blocks)), key=lambda i: blocks[i].distance_to(cx, cy))
+    block_height = max(block.bottom - block.top, 1)
+    return max(candidates, key=lambda im: (round(vertical_overlap(im) / block_height, 1), -horizontal_distance(im)))
+
+
+def area_of(image: Dict) -> float:
+    return (image["x1"] - image["x0"]) * (image["bottom"] - image["top"])

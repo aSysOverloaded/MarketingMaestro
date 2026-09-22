@@ -1,5 +1,6 @@
 import os
 import io
+import shutil
 import json
 import re
 import time
@@ -19,7 +20,7 @@ from app import diagnostics
 from app.config import settings
 from app.ai.catalog_brand import detect_catalog_brand
 from app.rag import extraction_cache
-from app.rag.layout import segment_words
+from app.rag.layout import image_for_block, segment_words
 from app.observability import log_stage
 
 logger = logging.getLogger("rag")
@@ -92,8 +93,10 @@ MAX_IMAGES_PER_PAGE = 2
 # Blocks shorter than this are page furniture, stray codes or captions: not worth an index
 # entry (and every entry costs an embedding request).
 MIN_CHUNK_CHARS = 80
-# Resolution for cropping a product photo out of the rendered page.
+# Resolution for cropping a product photo out of the rendered page. JPEG, not PNG: 594 PNG
+# crops of one catalogue came to 117 MB, and these are photographs.
 IMAGE_RENDER_DPI = 110
+IMAGE_JPEG_QUALITY = 82
 # Smaller than this (in PDF points squared) is an icon or colour swatch, not a product shot.
 MIN_PRODUCT_IMAGE_AREA = 2500
 MIN_IMAGE_BYTES = 4096  # skip icons, logos, separators
@@ -148,6 +151,16 @@ def initialize_collection(name: str) -> None:
         collection_name=name,
         vectors_config=VectorParams(size=VECTOR_DIMENSION, distance=Distance.COSINE),
     )
+
+
+def _drop_other_image_folders(keep: str) -> None:
+    """Remove images belonging to catalogs no longer indexed (one catalogue's crops are ~30 MB)."""
+    root = settings.storage_dir / "extracted_images"
+    if not root.is_dir():
+        return
+    for entry in root.iterdir():
+        if entry.name != keep:
+            shutil.rmtree(entry, ignore_errors=True) if entry.is_dir() else entry.unlink(missing_ok=True)
 
 
 def drop_other_collections(keep: str) -> None:
@@ -313,32 +326,18 @@ def _crop_block_image(plumber_page, block, page_number: int, block_index: int, d
     encodings a browser could not display anyway, and keeps the picture tied to where the
     product actually sits on the page.
     """
-    # A catalogue usually sets the photo *beside* its text, not inside it: on the real
-    # catalogue's page 31 the balls sit in a column at x -14..170 while their text blocks
-    # start at x 175. So prefer images whose vertical span overlaps this block, and among
-    # those take the closest horizontally.
-    def vertical_overlap(im):
-        return max(0.0, min(block.bottom, im["bottom"]) - max(block.top, im["top"]))
-
-    def horizontal_distance(im):
-        return abs((im["x0"] + im["x1"]) / 2 - (block.x0 + block.x1) / 2)
-
-    def area(im):
-        return (im["x1"] - im["x0"]) * (im["bottom"] - im["top"])
-
-    candidates = [im for im in plumber_page.images if area(im) >= MIN_PRODUCT_IMAGE_AREA and vertical_overlap(im) > 0]
-    if not candidates:
+    image = image_for_block(plumber_page.images, block, min_area=MIN_PRODUCT_IMAGE_AREA)
+    if image is None:
         return None
-    image = max(candidates, key=lambda im: (round(vertical_overlap(im) / max(block.bottom - block.top, 1), 1), -horizontal_distance(im)))
 
     scale = IMAGE_RENDER_DPI / 72
     box = (max(image["x0"] * scale, 0), max(image["top"] * scale, 0),
            min(image["x1"] * scale, rendered.width), min(image["bottom"] * scale, rendered.height))
     if box[2] - box[0] < 20 or box[3] - box[1] < 20:
         return None
-    name = f"page_{page_number}_block_{block_index}.png"
-    rendered.crop(box).save(os.path.join(dest_dir, name))
-    return f"/storage/extracted_images/{name}"
+    name = f"page_{page_number}_block_{block_index}.jpg"
+    rendered.crop(box).convert("RGB").save(os.path.join(dest_dir, name), "JPEG", quality=IMAGE_JPEG_QUALITY)
+    return f"/storage/extracted_images/{os.path.basename(dest_dir)}/{name}"
 
 
 def chunk_pdf_by_layout(pdf_bytes: bytes, dest_dir: str, job_id: str) -> tuple:
@@ -452,8 +451,11 @@ def ingest_pdf(pdf_bytes: bytes, job_id: str = "unknown", filename: str = "catal
     collection = collection_for(content_hash)
     initialize_collection(collection)
 
-    # Served at /storage/extracted_images/<name> by app.main
-    backend_storage = str(settings.storage_dir / "extracted_images")
+    # One image folder per catalog, served at /storage/extracted_images/<catalog>/<name>.
+    # Per-catalog so a replaced catalog's images can be dropped without touching the ones a
+    # half-finished ingest might still need.
+    images_root = settings.storage_dir / "extracted_images"
+    backend_storage = str(images_root / content_hash[:16])
     os.makedirs(backend_storage, exist_ok=True)
 
     # 2. Split the PDF into product-sized chunks (layout-aware, one per product block)
@@ -542,6 +544,7 @@ def ingest_pdf(pdf_bytes: bytes, job_id: str = "unknown", filename: str = "catal
     }), encoding="utf-8")
 
     drop_other_collections(keep=collection)
+    _drop_other_image_folders(keep=content_hash[:16])
 
     return {
         "success": True,

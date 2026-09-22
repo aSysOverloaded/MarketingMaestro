@@ -3,7 +3,7 @@
 Modelled on a real catalogue page: two columns, each holding a product whose name, size row
 and feature list are separated by ordinary paragraph spacing, plus rotated nav text.
 """
-from app.rag.layout import Block, assign_image_to_block, drop_rotated, segment_words
+from app.rag.layout import Block, drop_rotated, image_for_block, segment_words
 
 
 def word(text, x0, top, width=40, height=8):
@@ -52,14 +52,19 @@ def test_stray_short_lines_join_the_block_above():
     assert len(blocks) == 1 and blocks[0].text.endswith("99")
 
 
-def test_images_belong_to_the_block_they_sit_in():
-    blocks = segment_words(product("LEFT", 50, 100) + product("RIGHT", 400, 100))
-    inside_left = {"x0": 55, "x1": 95, "top": 105, "bottom": 145}
-    below_right = {"x0": 405, "x1": 445, "top": 900, "bottom": 940}
+def test_a_block_takes_the_image_beside_it():
+    """Catalogues put the photo next to the text, not inside it: on the real catalogue's page
+    31 the balls sit at x -14..170 while their text starts at x 175."""
+    blocks = segment_words(product("LEFT", 300, 100) + product("RIGHT", 800, 100))
+    beside_left = {"x0": 100, "x1": 250, "top": 100, "bottom": 160}   # same rows, to the left
+    beside_right = {"x0": 1000, "x1": 1150, "top": 100, "bottom": 160}
+    far_below = {"x0": 100, "x1": 250, "top": 900, "bottom": 960}     # no vertical overlap
+    images = [beside_left, beside_right, far_below]
 
-    assert assign_image_to_block(inside_left, blocks) == 0
-    assert assign_image_to_block(below_right, blocks) == 1  # nearest when inside nothing
-    assert assign_image_to_block(inside_left, []) is None
+    assert image_for_block(images, blocks[0]) is beside_left
+    assert image_for_block(images, blocks[1]) is beside_right
+    assert image_for_block([far_below], blocks[0]) is None  # nothing on those rows
+    assert image_for_block([beside_left], blocks[0], min_area=1_000_000) is None  # too small to be a product shot
 
 
 def test_block_geometry():

@@ -449,6 +449,21 @@ def html_step(ctx: JobContext) -> None:
     )
 
 
+# Generated brochures are ~1.5 MB each and nothing ever deleted them (29 MB after a day of
+# testing). The last few are worth keeping so a user can still open a previous PDF.
+KEEP_RECENT_OUTPUTS = 20
+
+
+def prune_old_outputs(keep: int = KEEP_RECENT_OUTPUTS) -> None:
+    for folder, pattern in ((settings.storage_dir / "generated_brochures", "*.pdf"),
+                            (settings.storage_dir / "temp_brochures", "*.html")):
+        if not folder.is_dir():
+            continue
+        files = sorted(folder.glob(pattern), key=lambda f: f.stat().st_mtime, reverse=True)
+        for stale in files[keep:]:
+            stale.unlink(missing_ok=True)
+
+
 def pdf_path_for(job_id: str) -> Path:
     return settings.storage_dir / "generated_brochures" / f"brochure_{job_id}.pdf"
 
@@ -460,6 +475,7 @@ def pdf_step(ctx: JobContext) -> None:
     path = pdf_path_for(ctx.job_id)
     render_pdf(ctx.html_path, path)
     ctx.pdf_path = path
+    prune_old_outputs()
 
 
 def _remove_pdf(ctx: JobContext) -> None:

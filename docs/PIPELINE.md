@@ -35,10 +35,20 @@ coordinates, split at vertical gutters (the whitespace columns running down a pa
 vertical gaps within each column. Sideways text (rotated nav tabs) is dropped, and lines
 repeated across ≥40% of pages (nav bars, running headers) are stripped before embedding.
 
-Each block is embedded separately, and the largest image **inside that block** is cropped out
-of the rendered page and stored as that product's photo. Cropping the render, rather than
-pulling the embedded image stream, both sidesteps encodings a browser cannot display and
-guarantees the picture belongs to the product beside it.
+Blocks that state no price and no product code are dropped: covers, index pages and brand
+stories cost an embedding request each and compete in search (a live run matched the cover).
+If fewer than 30% of blocks look like products, the catalog simply does not print prices, and
+everything is kept. The real catalogue keeps 441 of 644 blocks.
+
+Each remaining block is embedded separately and takes the image beside it - the one whose
+vertical span overlaps the block, nearest horizontally ([`image_for_block`](../ai-services-python/app/rag/layout.py)) -
+cropped out of the rendered page as a JPEG under `storage/extracted_images/<catalog>/`.
+Cropping the render, rather than pulling the embedded image stream, sidesteps encodings a
+browser cannot display and keeps the picture tied to the product it sits next to.
+
+The catalog's **brand** is identified once here, by a single LLM call
+([`app/ai/catalog_brand.py`](../ai-services-python/app/ai/catalog_brand.py)), and stored with
+the catalog; brochures use it instead of guessing a brand from product model names.
 
 Why: measured on a real 133-page catalogue, 71% of pages hold several products, and pages
 carry ~19 images each. One chunk per page meant four products shared one index entry and one
@@ -46,9 +56,18 @@ hero image, while stream-order text merged adjacent columns
 (`SOFTLOCK + MESH: 100% POLYESTERAvailable until 202880000274`). That catalogue yields 644
 blocks from 122 pages (median 6 per page), and 207 blocks get their own product photo.
 
-Pages pdfplumber cannot read fall back to one chunk per page, the previous behaviour. The catalog is remembered
-(`storage/catalog.json`) and reused by later runs, including after a restart, until you upload
-another or call `DELETE /api/rag/catalog`.
+Pages pdfplumber cannot read fall back to one chunk per page, the previous behaviour. The
+catalog is remembered (`storage/catalog.json`) and reused by later runs, including after a
+restart, until you upload another or call `DELETE /api/rag/catalog`.
+
+**Reuse is versioned.** An indexed catalog is reused only when the PDF's hash *and*
+`INGEST_VERSION` match, so changing how ingest works re-indexes on the next upload instead of
+serving an index built by the old rules. Bump that constant whenever ingest output changes
+(chunking, filtering, payload, embedding model, image selection, brand detection).
+
+**Ingest never destroys a working catalog.** It builds into its own collection and switches
+over only once chunks are indexed, so an ingest that runs out of quota or is killed leaves the
+previous catalog in use. Older collections and image folders are dropped afterwards.
 
 Embedding is the one thing that scales with catalog size: **one request per block**, and
 free-tier quota is 100 requests/minute, so ingest is rate-limited (batches of 50, waiting and
@@ -81,6 +100,10 @@ family size ≥ 3 → Family, and so on.
 3. **Rank** (LLM) – scores candidates against the profile and returns reasons. Invented or
    duplicate product ids are dropped. Every reason and explanation is then fact-checked
    (below); unsupported ones are removed, since they are printed in the brochure.
+4. **Cover every interest** – retrieval runs per hobby, but ranking picks the best overall, so
+   "basketball, running" could return four basketballs. Any interest ranking left out gets its
+   best product swapped in, with deterministic grounded reasons
+   (`copy_review.hobby_coverage_added`).
 
 If retrieval or extraction fails, the built-in demo catalog is used. If ranking fails, the
 deterministic scorer in [`app/ai/ranker.py`](../ai-services-python/app/ai/ranker.py) (budget
@@ -121,6 +144,9 @@ plus the segment. Then the draft is reviewed:
 > with the critic.
 
 ### 5–6. HTML and PDF
+Generated PDFs and compiled HTML are pruned to the most recent `KEEP_RECENT_OUTPUTS` (20) after
+each render; a catalog's images are removed when it is replaced.
+
 Jinja2 (autoescaped) renders the fixed-size A4 pages; local images are inlined as data URIs
 because the renderer opens the file over `file://`. Headless Chromium prints the PDF via
 Playwright, in a **child process** — on Windows, uvicorn's reload mode installs an event loop
