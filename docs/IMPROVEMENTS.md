@@ -307,8 +307,6 @@ Identified but not yet done. Ordered roughly by priority.
 - **UI text sizes are wrong in places.** `static/index.html` uses Tailwind arbitrary-size
   classes (`text-[10px]` and similar) that the Tailwind 2.2 CDN build doesn't support, so those
   labels render at the default size.
-- **Slow on the free model.** The copy step is about 30 s per writer call, and each revision
-  costs another writer + critic round. Consider a faster model for the writer.
 - **Branding only knows Samsung and LG.** Any uploaded catalog gets the "Premium Home" default,
   and the cover uses the top product's brand even when the options have mixed brands. Have the
   extractor return the brand, and use neutral cover branding for mixed selections.
