@@ -163,3 +163,24 @@ def test_query_embeddings_give_up_quickly(monkeypatch):
     assert slept == [search.MAX_QUERY_WAIT_SECONDS]  # capped, not the provider's 45s
     assert vector == [0.1] * search.VECTOR_DIMENSION  # degraded, and reported as mock
     assert search.diagnostics.get_status("embeddings")["mode"] == "mock"
+
+
+def test_ingesting_a_new_catalog_drops_the_previous_one(monkeypatch):
+    """A stale catalog must not survive into the next one's index: an on-disk collection kept
+    the old points, so searches for a new catalog returned products from the previous one."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "gemini_api_key", "")  # mock vectors: no API needed
+
+    search.ingest_pdf(_pdf("Trail Tent 2-person camping tent"), filename="first.pdf")
+    first_points = search.get_client().get_collection(search._current_collection()).points_count
+    assert first_points >= 1
+
+    search.ingest_pdf(_pdf("Rhenium Basketball Ball size 7"), filename="second.pdf")
+    contents = " ".join(
+        (p.payload.get("content") or "")
+        for p in search.get_client().scroll(collection_name=search._current_collection(), limit=100, with_payload=True)[0]
+    )
+    assert "Rhenium" in contents
+    assert "Trail Tent" not in contents
+    assert search.get_catalog()["filename"] == "second.pdf"

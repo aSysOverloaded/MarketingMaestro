@@ -37,14 +37,19 @@ _BRANDS = [
     (re.compile(r"\blg\b"), Brand("LG Electronics", "#a50034", "#3c3c3c", "L")),
 ]
 
-# Stock-photo fallback when the catalog page had no image. Checked in order.
+# Stock-photo fallback when a catalog page yielded no image of its own. Only used when the
+# product's category clearly matches one of these; a generic "nice photo" is worse than none,
+# because a kitchen picture in a sports brochure reads as a mistake to the customer.
 _STOCK_IMAGES = [
     (("refrigerator", "fridge"), "https://images.unsplash.com/photo-1588854337236-6889d631faa8?auto=format&fit=crop&q=80&w=800"),
     (("dishwasher",), "https://images.unsplash.com/photo-1581578731548-c64695cc6952?auto=format&fit=crop&q=80&w=800"),
     (("washer", "washing", "dryer"), "https://images.unsplash.com/photo-1626806787461-102c1bfaaea1?auto=format&fit=crop&q=80&w=800"),
     (("range", "oven", "stove", "cooktop", "microwave"), "https://images.unsplash.com/photo-1590794056226-79ef3a8147e1?auto=format&fit=crop&q=80&w=800"),
 ]
-_DEFAULT_STOCK_IMAGE = "https://images.unsplash.com/photo-1556910103-1c02745aae4d?auto=format&fit=crop&q=80&w=800"
+
+# Symbols for the currencies a catalog is likely to print; anything else is shown as a code
+# ("CHF 59.00"), which is correct if less pretty.
+_CURRENCY_SYMBOLS = {"EUR": "€", "USD": "$", "GBP": "£", "INR": "₹", "JPY": "¥"}
 
 _MIME_TYPES = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".gif": "image/gif", ".webp": "image/webp"}
 
@@ -57,14 +62,18 @@ def brand_for_model(model: str) -> Brand:
     return DEFAULT_BRAND
 
 
-def hero_image_for(product: Product) -> str:
+def hero_image_for(product: Product) -> Optional[str]:
+    """The product's own photo, a clearly-matching stock photo, or nothing at all.
+
+    Nothing is the right answer when neither applies: the template then shows a branded panel
+    instead of a stock image of some unrelated product."""
     if product.hero_image:
         return embed_local_image(product.hero_image)
     haystack = f"{product.category or ''} {product.model}".lower()
     for keywords, url in _STOCK_IMAGES:
         if any(k in haystack for k in keywords):
             return url
-    return _DEFAULT_STOCK_IMAGE
+    return None
 
 
 def embed_local_image(src: str) -> str:
@@ -83,8 +92,14 @@ def embed_local_image(src: str) -> str:
 
 
 def _price(product: Product) -> Optional[str]:
-    # 0 = no price stated in the catalog; the template shows "on request".
-    return f"{product.base_price:,.2f}" if product.base_price > 0 else None
+    """Price with the catalog's own currency, or None when the catalog states no price
+    (the template then shows "on request" rather than a made-up figure)."""
+    if product.base_price <= 0:
+        return None
+    amount = f"{product.base_price:,.2f}"
+    code = (product.currency or "USD").strip().upper()
+    symbol = _CURRENCY_SYMBOLS.get(code)
+    return f"{symbol}{amount}" if symbol else f"{code} {amount}"
 
 
 def compile_html(

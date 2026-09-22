@@ -30,6 +30,8 @@ class Product(BaseModel):
     model: str
     # 0 means the catalog states no price. Rendered as "on request", never as $0.
     base_price: float = 0
+    # Taken from the catalog: printing a euro price with a dollar sign is a false claim.
+    currency: Optional[str] = None
     category: Optional[str] = None
     capacity: Optional[str] = None
     power: Optional[str] = None

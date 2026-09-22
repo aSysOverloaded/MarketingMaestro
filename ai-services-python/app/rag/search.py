@@ -23,7 +23,27 @@ from app.observability import log_stage
 
 logger = logging.getLogger("rag")
 
-COLLECTION_NAME = "catalog_products"
+# One collection per catalog, named from its content hash. qdrant-client 1.9's on-disk mode
+# does not really drop a deleted collection's points - after delete + create they are still
+# there - so reusing a single name left the previous catalog's products turning up in searches
+# for the new one (884 points indexed for a 644-chunk catalogue). A fresh name per catalog
+# sidesteps that entirely; the old collection is deleted too, for tidiness.
+COLLECTION_PREFIX = "catalog_"
+
+
+def collection_for(catalog_sha: str) -> str:
+    return f"{COLLECTION_PREFIX}{catalog_sha[:16]}"
+
+
+def _current_collection() -> Optional[str]:
+    """Name of the collection holding the catalog currently in use, if any."""
+    meta_path = _catalog_meta_path()
+    if not meta_path.is_file():
+        return None
+    try:
+        return json.loads(meta_path.read_text(encoding="utf-8")).get("collection")
+    except Exception:
+        return None
 
 # Local on-disk Qdrant (storage/qdrant) so the indexed catalog survives restarts. Created
 # lazily: `python -m app.main` runs uvicorn with reload, which imports this module in both the
@@ -62,6 +82,8 @@ MAX_IMAGES_PER_PAGE = 2
 MIN_CHUNK_CHARS = 80
 # Resolution for cropping a product photo out of the rendered page.
 IMAGE_RENDER_DPI = 110
+# Smaller than this (in PDF points squared) is an icon or colour swatch, not a product shot.
+MIN_PRODUCT_IMAGE_AREA = 2500
 MIN_IMAGE_BYTES = 4096  # skip icons, logos, separators
 # Free-tier embedding quota is per minute and counts one request per text, so a large catalog
 # WILL hit it mid-ingest. Waiting and retrying is the difference between a fully indexed
@@ -74,8 +96,9 @@ EMBED_RETRY_SECONDS = 25
 QUERY_EMBED_RETRIES = 1
 MAX_QUERY_WAIT_SECONDS = 10
 
-def _collection_exists() -> bool:
-    return any(c.name == COLLECTION_NAME for c in get_client().get_collections().collections)
+def _collection_exists(name: Optional[str] = None) -> bool:
+    name = name or _current_collection()
+    return bool(name) and any(c.name == name for c in get_client().get_collections().collections)
 
 
 def get_catalog() -> Optional[dict]:
@@ -85,7 +108,7 @@ def get_catalog() -> Optional[dict]:
     meta_path = _catalog_meta_path()
     if not meta_path.is_file() or not _collection_exists():
         return None
-    if get_client().get_collection(COLLECTION_NAME).points_count == 0:
+    if get_client().get_collection(_current_collection()).points_count == 0:
         return None
     return json.loads(meta_path.read_text(encoding="utf-8"))
 
@@ -93,15 +116,20 @@ def get_catalog() -> Optional[dict]:
 def clear_catalog() -> None:
     current = get_catalog()
     if _collection_exists():
-        get_client().delete_collection(COLLECTION_NAME)
+        get_client().delete_collection(_current_collection())
     _catalog_meta_path().unlink(missing_ok=True)
     if current:
         extraction_cache.clear(current["sha256"])
 
 
-def initialize_collection():
-    get_client().recreate_collection(
-        collection_name=COLLECTION_NAME,
+def initialize_collection(name: str) -> None:
+    """Create an empty collection for this catalog, dropping every older catalog's."""
+    client = get_client()
+    for existing in client.get_collections().collections:
+        if existing.name.startswith(COLLECTION_PREFIX):
+            client.delete_collection(collection_name=existing.name)
+    client.create_collection(
+        collection_name=name,
         vectors_config=VectorParams(size=VECTOR_DIMENSION, distance=Distance.COSINE),
     )
 
@@ -244,19 +272,29 @@ def select_page_images(page, page_number: int, dest_dir: str) -> list:
 
 
 def _crop_block_image(plumber_page, block, page_number: int, block_index: int, dest_dir: str, rendered) -> Optional[str]:
-    """Save the largest image sitting inside this block, cropped out of the rendered page.
+    """Save this block's product photo, cropped out of the rendered page.
 
-    Cropping the rendered page (rather than pulling the embedded image stream) sidesteps
-    exotic encodings a browser could not display anyway, and guarantees the picture belongs to
-    this product: it is taken from where the product actually sits on the page.
+    Cropping the render (rather than pulling the embedded image stream) sidesteps exotic
+    encodings a browser could not display anyway, and keeps the picture tied to where the
+    product actually sits on the page.
     """
-    inside = [im for im in plumber_page.images
-              if block.contains((im["x0"] + im["x1"]) / 2, (im["top"] + im["bottom"]) / 2, margin=30)]
-    if not inside:
+    # A catalogue usually sets the photo *beside* its text, not inside it: on the real
+    # catalogue's page 31 the balls sit in a column at x -14..170 while their text blocks
+    # start at x 175. So prefer images whose vertical span overlaps this block, and among
+    # those take the closest horizontally.
+    def vertical_overlap(im):
+        return max(0.0, min(block.bottom, im["bottom"]) - max(block.top, im["top"]))
+
+    def horizontal_distance(im):
+        return abs((im["x0"] + im["x1"]) / 2 - (block.x0 + block.x1) / 2)
+
+    def area(im):
+        return (im["x1"] - im["x0"]) * (im["bottom"] - im["top"])
+
+    candidates = [im for im in plumber_page.images if area(im) >= MIN_PRODUCT_IMAGE_AREA and vertical_overlap(im) > 0]
+    if not candidates:
         return None
-    image = max(inside, key=lambda im: (im["x1"] - im["x0"]) * (im["bottom"] - im["top"]))
-    if (image["x1"] - image["x0"]) * (image["bottom"] - image["top"]) < 2500:  # thumbnail-sized: not a product shot
-        return None
+    image = max(candidates, key=lambda im: (round(vertical_overlap(im) / max(block.bottom - block.top, 1), 1), -horizontal_distance(im)))
 
     scale = IMAGE_RENDER_DPI / 72
     box = (max(image["x0"] * scale, 0), max(image["top"] * scale, 0),
@@ -343,13 +381,14 @@ def ingest_pdf(pdf_bytes: bytes, job_id: str = "unknown", filename: str = "catal
         log_stage(logger, job_id, "ingest", f"content hash matches currently indexed catalog ({content_hash[:12]}...), skipping re-embed")
         return {"success": True, "indexed_pages": current["indexed_pages"],
                 "indexed_chunks": current.get("indexed_chunks", current["indexed_pages"]),
-                "collection_name": COLLECTION_NAME, "reused": True}
+                "collection_name": current.get("collection"), "reused": True}
 
     start = time.monotonic()
     log_stage(logger, job_id, "ingest", f"starting ingest of {len(pdf_bytes)} bytes")
 
-    # 1. Clear and create the Qdrant collection
-    initialize_collection()
+    # 1. A fresh collection for this catalog (and goodbye to any previous one)
+    collection = collection_for(content_hash)
+    initialize_collection(collection)
 
     # Served at /storage/extracted_images/<name> by app.main
     backend_storage = str(settings.storage_dir / "extracted_images")
@@ -386,7 +425,7 @@ def ingest_pdf(pdf_bytes: bytes, job_id: str = "unknown", filename: str = "catal
     # 4. Insert points into Qdrant index
     if points:
         get_client().upsert(
-            collection_name=COLLECTION_NAME,
+            collection_name=collection,
             wait=True,
             points=points
         )
@@ -411,6 +450,7 @@ def ingest_pdf(pdf_bytes: bytes, job_id: str = "unknown", filename: str = "catal
     _catalog_meta_path().write_text(json.dumps({
         "filename": filename,
         "sha256": content_hash,
+        "collection": collection,
         "indexed_pages": indexed_count,
         "indexed_chunks": len(chunks),
         "indexed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -421,7 +461,7 @@ def ingest_pdf(pdf_bytes: bytes, job_id: str = "unknown", filename: str = "catal
         "success": True,
         "indexed_pages": indexed_count,
         "indexed_chunks": len(chunks),
-        "collection_name": COLLECTION_NAME,
+        "collection_name": collection,
         "reused": False,
     }
 
@@ -442,7 +482,7 @@ def get_stats() -> dict:
             "embeddings_detail": embeddings_detail,
         }
 
-    info = get_client().get_collection(COLLECTION_NAME)
+    info = get_client().get_collection(_current_collection())
     return {
         "collection_exists": True,
         "point_count": info.points_count,
@@ -464,7 +504,7 @@ def search_catalog(query: str, limit: int = 3, job_id: str = "unknown") -> list:
 
     # 2. Perform Cosine Similarity Search
     search_results = get_client().search(
-        collection_name=COLLECTION_NAME,
+        collection_name=_current_collection(),
         query_vector=query_vector,
         limit=limit
     )

@@ -47,6 +47,7 @@ class ExtractedProduct(BaseModel):
     id: str = Field(description="Short unique snake_case id, e.g. appliance_fridge_samsung")
     model: str = Field(description="Product model name exactly as stated, or the page heading if no model name is stated")
     base_price: float = Field(default=0, description="Price exactly as stated on the page; 0 if no price is stated. Never estimate.")
+    currency: Optional[str] = Field(default=None, description="Currency of base_price exactly as printed on the page, e.g. EUR, USD, GBP")
     category: Optional[str] = Field(default=None, description="Product category if stated or clearly named, e.g. Refrigerator, Tent")
     capacity: Optional[str] = Field(default=None, description="Capacity/size only if stated")
     power: Optional[str] = Field(default=None, description="Power rating only if stated")

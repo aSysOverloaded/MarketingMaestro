@@ -64,6 +64,12 @@ def test_compile_html_renders_copy_and_only_stated_specs(tmp_path):
     assert "three" in html and "four" not in html  # capped at MAX_COVER_PARAGRAPHS
     assert "Book a demo &lt;now&gt;" in html  # autoescaped
     assert "Price on request" in html and "$0" not in html
+
+    priced = Product(id="p2", model="Rhenium Ball", base_price=59, currency="EUR")
+    rec2 = Recommendation(recommendation_id="r2", product_id="p2", score=90, matched_rules=[], explanation="")
+    euro_html = compile_html(job_id="j2", trace_id="t", segment="Adventure", copy=copy,
+                             recommendations=[rec2], products=[priced], output_dir=tmp_path).read_text(encoding="utf-8")
+    assert "€59.00" in euro_html and "$59.00" not in euro_html  # the catalog's currency, not a dollar sign
     assert "Certified" not in html and "Available" not in html
 
 

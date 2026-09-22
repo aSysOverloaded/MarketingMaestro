@@ -87,7 +87,7 @@
                             <span class="h-6 w-6 rounded-full bg-blue-100 text-blue-800 font-bold text-xs flex items-center justify-center">{{ loop.index }}</span>
                             <div>
                                 <h4 class="font-bold text-gray-800 text-sm">{{ item.product.model }}</h4>
-                                <p class="text-xs text-gray-400">{% if item.product.price %}Starting from ${{ item.product.price }}{% else %}Price on request{% endif %}</p>
+                                <p class="text-xs text-gray-400">{% if item.product.price %}Starting from {{ item.product.price }}{% else %}Price on request{% endif %}</p>
                             </div>
                         </div>
                         <div class="text-right">
@@ -130,9 +130,11 @@
 
         <div class="my-auto space-y-6">
             <!-- Hero image -->
-            <div class="relative rounded-2xl overflow-hidden shadow-lg h-64 bg-gray-900">
+            <div class="relative rounded-2xl overflow-hidden shadow-lg h-64" style="background: linear-gradient(135deg, {{ item.brand.primary_color }} 0%, {{ item.brand.secondary_color }} 100%);">
+                {% if item.product.hero_image %}
                 <img class="absolute inset-0 w-full h-full object-cover" src="{{ item.product.hero_image }}" alt="{{ item.product.model }}">
                 <div class="absolute inset-0 bg-gradient-to-t from-black/60 to-transparent"></div>
+                {% endif %}
                 <div class="absolute bottom-4 left-6 text-white">
                     <span class="text-xs text-gray-300 font-medium tracking-wide">Dynamic Feature Spotlight</span>
                     <h3 class="text-2xl font-bold">{{ item.product.model }}</h3>
@@ -161,7 +163,7 @@
             <div class="grid grid-cols-3 gap-4">
                 <div class="bg-gray-50 p-3 rounded-xl border border-gray-100 text-center">
                     <span class="text-[10px] text-gray-400 font-semibold uppercase tracking-wider block">Price</span>
-                    <span class="text-sm font-bold text-gray-800">{% if item.product.price %}${{ item.product.price }}{% else %}On request{% endif %}</span>
+                    <span class="text-sm font-bold text-gray-800">{% if item.product.price %}{{ item.product.price }}{% else %}On request{% endif %}</span>
                 </div>
                 {% for label, value in [("Category", item.product.category), ("Capacity", item.product.capacity), ("Power", item.product.power)] if value %}
                 <div class="bg-gray-50 p-3 rounded-xl border border-gray-100 text-center">
