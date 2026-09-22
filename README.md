@@ -23,7 +23,7 @@ Tests (offline, no API keys needed): `venv/Scripts/python -m pytest`
 
 ## How a request flows
 
-`POST /api/recommend` (form fields + optional catalog PDF):
+`POST /api/recommend` (form fields + optional catalog PDF) starts a background job and returns `202 {job_id, status_url}`; poll `GET /api/jobs/{job_id}` for per-step progress and, when `status` is `done`, the `result`. Steps:
 
 1. **Ingest** the PDF: page text is embedded (Gemini) into an on-disk Qdrant index (`storage/qdrant`); page images are saved. Without a PDF, the previously indexed catalog is reused (it survives restarts); `DELETE /api/rag/catalog` forgets it. The app is single-user by design: one catalog at a time.
 2. **profile** – LLM assigns a segment and budget tier (rule-based fallback).

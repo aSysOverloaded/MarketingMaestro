@@ -1,14 +1,16 @@
 import logging
 import re
+import threading
+import time
 import uuid
 from contextlib import asynccontextmanager
-from typing import List, Optional
+from typing import Optional
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from app import jobs
 from app.catalog import CustomerInput
 from app.config import SERVICE_DIR, log_startup_config, settings
 from app.delivery.email import send_brochure
@@ -42,7 +44,7 @@ app = FastAPI(title="Marketing Agent", lifespan=lifespan)
 settings.storage_dir.mkdir(parents=True, exist_ok=True)
 
 
-@app.post("/api/recommend")
+@app.post("/api/recommend", status_code=202)
 def recommend(
     age: Optional[int] = Form(None),
     income: Optional[float] = Form(None),
@@ -51,9 +53,10 @@ def recommend(
     hobbies: str = Form(""),
     brochure: Optional[UploadFile] = File(None),
 ):
+    """Start a brochure job in the background and return its id right away. Poll
+    GET /api/jobs/{job_id} for step-by-step progress and, once done, the result."""
     job_id = f"job_{uuid.uuid4().hex}"
     trace_id = f"trace_{uuid.uuid4().hex[:16]}"
-    warnings: List[dict] = []
 
     submitted = {
         "age": age or None,
@@ -62,51 +65,78 @@ def recommend(
         "location": location.strip() or None,
         "hobbies": [h.strip() for h in hobbies.split(",") if h.strip()] or None,
     }
+    customer = CustomerInput(**{k: (DEFAULTS[k] if v is None else v) for k, v in submitted.items()})
+    ctx = JobContext(job_id=job_id, trace_id=trace_id, customer=customer)
     defaulted = [k for k, v in submitted.items() if v is None]
     if defaulted:
         # Previously silent: empty fields quietly became a 32-year-old in Seattle who likes trekking.
-        warnings.append({"step": "input", "message": f"Used default values for: {', '.join(defaulted)}."})
-    customer = CustomerInput(**{k: (DEFAULTS[k] if v is None else v) for k, v in submitted.items()})
+        ctx.warnings.append({"step": "input", "message": f"Used default values for: {', '.join(defaulted)}."})
 
-    ctx = JobContext(job_id=job_id, trace_id=trace_id, customer=customer)
-    ctx.warnings.extend(warnings)
-
-    catalog_source = None
+    # Read the upload inside the request - the file handle is closed once the response is sent.
+    upload = None
     if brochure is not None and brochure.filename:
         pdf_bytes = brochure.file.read(MAX_UPLOAD_BYTES + 1)
         if len(pdf_bytes) > MAX_UPLOAD_BYTES:
             raise HTTPException(status_code=413, detail="Brochure PDF exceeds the 15 MB limit.")
-        try:
-            result = ingest_pdf(pdf_bytes, job_id=job_id, filename=brochure.filename)
-            ctx.catalog_indexed = result["indexed_pages"] > 0
-            catalog_source = "uploaded" if ctx.catalog_indexed else None
-            if not ctx.catalog_indexed:
-                ctx.warn("ingest", "The uploaded PDF has no extractable text (scanned images only?).")
-        except Exception as e:
-            ctx.warn("ingest", f"Failed to read the uploaded PDF ({e}).")
-    elif get_catalog():
-        # No file this time: keep using the catalog already indexed (it persists across runs
-        # and restarts). Previously this silently fell back to the demo catalog.
-        ctx.catalog_indexed = True
-        catalog_source = "reused"
+        upload = (pdf_bytes, brochure.filename)
 
+    workflow = build_workflow()
+    job = jobs.create(job_id, (["ingest"] if upload else []) + [step.name for step in workflow.steps])
+    ctx.on_note = job.set_note
+    threading.Thread(target=_run_job, args=(job, ctx, workflow, upload), daemon=True).start()
+    return {"job_id": job_id, "status_url": f"/api/jobs/{job_id}"}
+
+
+@app.get("/api/jobs/{job_id}")
+def job_status(job_id: str):
+    job = jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Unknown job (jobs are kept in memory and lost on restart).")
+    return job.to_dict()
+
+
+def _run_job(job: jobs.Job, ctx: JobContext, workflow, upload) -> None:
     try:
-        build_workflow().run(ctx)
+        catalog_source = _prepare_catalog(job, ctx, upload)
+        workflow.run(ctx, on_step=job.step_update)
+        job.finish(_result(ctx, catalog_source))
     except WorkflowError as e:
-        return JSONResponse(status_code=500, content={
-            "success": False,
-            "job_id": job_id,
-            "trace_id": trace_id,
-            "failed_step": e.step,
-            "error": str(e.cause),
-            "warnings": ctx.warnings,
-        })
+        job.fail({"failed_step": e.step, "error": str(e.cause), "warnings": ctx.warnings})
+    except Exception as e:  # never leave a job stuck in "running"
+        log_stage(logger, ctx.job_id, "job", f"crashed: {e}", level="error")
+        job.fail({"failed_step": None, "error": str(e), "warnings": ctx.warnings})
 
+
+def _prepare_catalog(job: jobs.Job, ctx: JobContext, upload) -> Optional[str]:
+    """Index the uploaded PDF, or reuse the already-indexed catalog. Returns the catalog source."""
+    if upload is None:
+        if get_catalog():
+            # No file this time: keep using the catalog already indexed (it persists across
+            # runs and restarts). Previously this silently fell back to the demo catalog.
+            ctx.catalog_indexed = True
+            return "reused"
+        return None
+
+    pdf_bytes, filename = upload
+    job.step_update("ingest", "running", None)
+    start = time.monotonic()
+    try:
+        result = ingest_pdf(pdf_bytes, job_id=ctx.job_id, filename=filename)
+        ctx.catalog_indexed = result["indexed_pages"] > 0
+        if not ctx.catalog_indexed:
+            ctx.warn("ingest", "The uploaded PDF has no extractable text (scanned images only?).")
+    except Exception as e:
+        ctx.warn("ingest", f"Failed to read the uploaded PDF ({e}).")
+    job.step_update("ingest", "done", int((time.monotonic() - start) * 1000))
+    return "uploaded" if ctx.catalog_indexed else None
+
+
+def _result(ctx: JobContext, catalog_source: Optional[str]) -> dict:
     products = {p.id: p for p in ctx.selected_products}
     return {
         "success": True,
-        "job_id": job_id,
-        "trace_id": trace_id,
+        "job_id": ctx.job_id,
+        "trace_id": ctx.trace_id,
         "segment": ctx.profile.segment,
         "budget_tier": ctx.profile.budget_tier,
         "recommendations": [{**r.model_dump(), "model": products[r.product_id].model} for r in ctx.recommendations],

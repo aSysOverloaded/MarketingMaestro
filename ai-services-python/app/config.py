@@ -34,7 +34,8 @@ class Settings(BaseSettings):
     # Used for every chat step (profile, extraction, ranking, planner, writer, critic, evaluator).
     llm_api_url: str = "https://openrouter.ai/api/v1"
     llm_api_key: str = ""
-    llm_model: str = "nvidia/nemotron-3-super-120b-a12b:free"
+    # Free-tier lineups rotate and get overloaded; check docs/IMPROVEMENTS.md for what last worked.
+    llm_model: str = "nex-agi/nex-n2.5-pro:free"
     # Optional stronger model for the spec critic only (same endpoint/key). Fact-checking is
     # where a weak model hurts most, and it is one call per draft. Empty = use LLM_MODEL.
     llm_critic_model: str = ""

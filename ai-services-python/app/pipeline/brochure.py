@@ -8,7 +8,7 @@ catalog, auto-passed critic, mock PDF) while still reporting success.
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from app import diagnostics
 from app.ai.critic import audit_copy
@@ -72,10 +72,16 @@ class JobContext:
 
     rag_debug: Dict[str, Any] = field(default_factory=lambda: {"active": False})
     warnings: List[Dict[str, str]] = field(default_factory=list)
+    # Receives short human-readable progress notes ("Writing draft 2") for the UI.
+    on_note: Optional[Callable[[str], None]] = None
 
     def warn(self, step: str, message: str) -> None:
         self.warnings.append({"step": step, "message": message})
         log_stage(logger, self.job_id, step, f"WARNING: {message}", level="warning")
+
+    def note(self, message: str) -> None:
+        if self.on_note:
+            self.on_note(message)
 
 
 # --- Steps ---------------------------------------------------------------------------
@@ -95,6 +101,7 @@ def _retrieve_candidates(ctx: JobContext) -> List[Product]:
     queries = [f"Gear and equipment for {h.strip()}." for h in hobbies]
     ctx.rag_debug = {"active": True, "query": " | ".join(queries), "match_count": 0, "matches": []}
 
+    ctx.note(f"Searching the catalog ({len(queries)} {'query' if len(queries) == 1 else 'queries'})")
     merged: Dict[int, dict] = {}
     for query in queries:
         for m in search_catalog(query, PER_HOBBY_LIMIT, job_id=ctx.job_id):
@@ -114,6 +121,7 @@ def _retrieve_candidates(ctx: JobContext) -> List[Product]:
     if not matches:
         raise RuntimeError(f"retrieval returned 0 matches across {len(queries)} hobby queries")
 
+    ctx.note(f"Extracting products from {len(matches)} matched page(s)")
     pages_text = "".join(f"--- PAGE {m['page_number']} ---\n{m['content']}\n" for m in matches)
     products = extract_products(pages_text, ctx.job_id)
     images_by_page = {m["page_number"]: m["images"] for m in matches}
@@ -140,6 +148,7 @@ def recommend_step(ctx: JobContext) -> None:
         ctx.warn("recommend", "Recommendations come from the built-in demo catalog, not an uploaded one.")
     ctx.candidates = candidates
 
+    ctx.note(f"Ranking {len(candidates)} products")
     try:
         ctx.recommendations = rank_products(ctx.customer, ctx.profile.segment, ctx.profile.budget_tier, candidates, ctx.job_id)
     except Exception as e:
@@ -241,6 +250,7 @@ def copy_step(ctx: JobContext) -> None:
     warned: set = set()
 
     for attempt in range(MAX_REVISIONS + 1):
+        ctx.note(f"Writing draft {attempt + 1}" + (" (revising with reviewer feedback)" if attempt else ""))
         try:
             draft = generate_copy(segment, ctx.sections, product, job_id=ctx.job_id, feedback=feedback)
         except Exception as e:
@@ -248,6 +258,7 @@ def copy_step(ctx: JobContext) -> None:
             ctx.warn("copy", f"AI copywriter unavailable ({e}); used generic copy.")
             return
 
+        ctx.note(f"Fact-checking draft {attempt + 1}")
         issues = _review(ctx, draft, product, warned)
         ctx.review["revisions"] = attempt
         if not issues:

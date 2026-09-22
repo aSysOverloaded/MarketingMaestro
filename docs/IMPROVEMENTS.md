@@ -8,6 +8,46 @@ Open items that have been identified but not yet done live in [Backlog](#backlog
 
 ---
 
+## 2026-09-22 — Real progress in the UI; working free model
+
+### Real step-by-step progress
+- **Problem:** The loading card changed text on fixed `setTimeout` timers (3.5 s, 7.5 s) that
+  had nothing to do with what the pipeline was doing, while real runs take 2–3 minutes.
+- **Fix:**
+  - `POST /api/recommend` now starts a background job and returns `202 {job_id, status_url}`
+    right away.
+  - New `GET /api/jobs/{job_id}` returns each step's status (`pending` / `running` / `done` /
+    `failed`) and duration, plus a live note from inside the step ("Ranking 3 products",
+    "Writing draft 2 (revising with reviewer feedback)", "Fact-checking draft 2"), and the
+    result or the error once finished.
+  - Plumbing: `Workflow.run(ctx, on_step=...)` reports each step, `JobContext.note()` carries
+    the sub-step notes, and `app/jobs.py` is an in-memory registry that keeps the last 20 jobs
+    (single-user). Catalog indexing shows up as its own "ingest" step when a PDF is uploaded.
+  - The UI polls every second and renders the step list with timings. The fake timers are
+    gone. A failed job shows which step failed and still shows its warnings.
+- **Breaking API change:** `/api/recommend` no longer returns the result directly. The same
+  result object is now at `GET /api/jobs/{id}` → `result`. The only client is `static/index.html`.
+- **Also:** the upload hint said "Max 10MB" while the limit is 15 MB.
+- **Files:** `app/jobs.py` (new), `app/main.py`, `app/pipeline/workflow.py`,
+  `app/pipeline/brochure.py`, `static/index.html`, tests
+- **Verified:** 31 tests. The API tests now submit and poll, and a new test covers a failing
+  step (status `failed`, the failed step named, warnings kept). I drove the real UI headlessly
+  against the live server and model: steps and notes updated live, with no page errors.
+  Timeline: profile 5 s, recommend 14 s, plan 25 s, draft 1 written in ~60 s and fact-checked
+  in ~35 s, draft 2 in ~25 s + ~35 s, PDF ~9 s, 210 s total. **The copy step is ~80% of the
+  run time.**
+
+### Model
+- New OpenRouter key installed in `.env`. The old default `nvidia/nemotron-3-super-120b-a12b:free`
+  was persistently `503 overloaded`. `nex-agi/nex-n2.5-pro:free` passed structured-output
+  checks repeatedly and is now the default in `config.py` and `.env.example`. Also working at
+  the time: `nvidia/nemotron-3-ultra-550b-a55b:free` (but ~97 s for one small call) and,
+  intermittently, `qwen/qwen3.8-27b:free` (sometimes `429`). With it, the first run with **no
+  AI fallbacks at all** completed: grounded copy after one revision, sensible varied ranking
+  (82/76/63), and ranker reasons passing the new grounding check with nothing removed.
+
+---
+
 ## 2026-09-22 — Catalog persists and is reused; ranker reasons are fact-checked
 
 ### The uploaded catalog was forgotten on the next run
@@ -256,17 +296,17 @@ Identified but not yet done. Ordered roughly by priority.
 > named extracted images, publicly served `/storage`) is acceptable under this assumption, so
 > multi-user items are out of scope rather than backlog.
 
-- **The free model is often overloaded.** OpenRouter's free Nvidia provider returned `503
-  provider overloaded` for most calls in several runs, so the brochure fell back to generic
-  copy. The fallbacks work and are reported, but in practice the product needs a paid or
-  less contended `LLM_MODEL` (and optionally `LLM_CRITIC_MODEL`).
 - **Generic invented claims still rely on the LLM critic.** The grounding check catches
   branded names, acronyms and numbers. Plain-language additions like "get alerts on your
   phone" still depend on the critic.
 - **Critic and writer only see the top product**, while the brochure shows up to 4.
-- **The UI's progress messages are fake.** `setTimeout` timers switch the text at 3.5 s and
-  7.5 s whatever the pipeline is actually doing, while real runs take 30–120 s. Stream real
-  step progress (Server-Sent Events from the workflow runner).
+- **The copy step is ~80% of the run time.** Writing a draft takes ~25–60 s and fact-checking
+  one takes ~35 s, on the free model. Options: a faster model for the writer, running the
+  critic and evaluator in parallel (they're independent), or skipping the LLM critic when the
+  deterministic check already failed a draft.
+- **UI text sizes are wrong in places.** `static/index.html` uses Tailwind arbitrary-size
+  classes (`text-[10px]` and similar) that the Tailwind 2.2 CDN build doesn't support, so those
+  labels render at the default size.
 - **Slow on the free model.** The copy step is about 30 s per writer call, and each revision
   costs another writer + critic round. Consider a faster model for the writer.
 - **Branding only knows Samsung and LG.** Any uploaded catalog gets the "Premium Home" default,
@@ -286,8 +326,8 @@ Identified but not yet done. Ordered roughly by priority.
 - **Leftovers:** empty `frontend-nextjs/`. The service directory is still named
   `ai-services-python/` although it is now the whole backend.
 
-**Done:** catalog reuse and persistence, and fact-checking ranker reasons (2026-09-22, see
-above). Also, by the Python migration: silent fallbacks,
+**Done:** catalog reuse and persistence, fact-checking ranker reasons, and real UI progress
+(2026-09-22, see above). Also, by the Python migration: silent fallbacks,
 critic re-rolling instead of revising, retry stacking, silent form defaults, unverified template
 claims, timestamp job ids / CORS `*` / SMTP `InsecureSkipVerify`, and the dead car-era code
 (`ProductMatcher` now drives the ranking fallback).

@@ -52,20 +52,22 @@ def test_identical_upload_with_real_embeddings_is_not_re_embedded(monkeypatch):
     assert search.ingest_pdf(PDF, filename="tents.pdf")["reused"]
 
 
-def test_run_without_upload_reuses_the_indexed_catalog_until_forgotten(no_llm):
+def test_run_without_upload_reuses_the_indexed_catalog_until_forgotten(no_llm, submit_job):
     from app.main import app
 
     client = TestClient(app)
     form = {"age": "40", "income": "90000", "family_size": "3", "location": "Denver", "hobbies": "camping"}
 
-    first = client.post("/api/recommend", data=form, files={"brochure": ("tents.pdf", PDF, "application/pdf")}).json()
+    first_job = submit_job(client, form, files={"brochure": ("tents.pdf", PDF, "application/pdf")})
+    assert first_job["steps"][0]["name"] == "ingest" and first_job["steps"][0]["status"] == "done"
+    first = first_job["result"]
     assert first["catalog"]["source"] == "uploaded"
 
-    second = client.post("/api/recommend", data=form).json()
+    second = submit_job(client, form)["result"]
     assert second["catalog"]["filename"] == "tents.pdf" and second["catalog"]["source"] == "reused"
     assert second["rag_debug"]["active"]
 
     assert client.delete("/api/rag/catalog").status_code == 200
-    third = client.post("/api/recommend", data=form).json()
+    third = submit_job(client, form)["result"]
     assert third["catalog"] is None and not third["rag_debug"]["active"]
     assert client.get("/api/rag/stats").json()["catalog"] is None

@@ -75,18 +75,36 @@ def test_embed_local_image_stays_inside_storage(isolated_storage):
     assert embed_local_image("https://example.com/x.jpg") == "https://example.com/x.jpg"
 
 
-def test_api_recommend_and_send_email(no_llm):
+def test_api_recommend_reports_progress_and_send_email(no_llm, submit_job):
     from app.main import app
 
     client = TestClient(app)
-    resp = client.post("/api/recommend", data={"age": "40", "income": "90000", "family_size": "3", "location": "", "hobbies": "camping"})
-    assert resp.status_code == 200
-    body = resp.json()
+    job = submit_job(client, {"age": "40", "income": "90000", "family_size": "3", "location": "", "hobbies": "camping"})
+    assert job["status"] == "done"
+    assert [s["name"] for s in job["steps"]] == ["profile", "recommend", "plan", "copy", "html", "pdf"]
+    assert all(s["status"] == "done" and s["ms"] is not None for s in job["steps"])
+    body = job["result"]
     assert body["success"] and body["pdf_url"] is None and body["recommendations"][0]["model"]
     assert any(w["step"] == "input" and "location" in w["message"] for w in body["warnings"])
 
     assert client.post("/api/send-email", data={"job_id": "../../etc", "email": "a@b.co"}).status_code == 400
     assert client.post("/api/send-email", data={"job_id": body["job_id"], "email": "a@b.co"}).status_code == 404
+    assert client.get("/api/jobs/job_unknown").status_code == 404
+
+
+def test_failed_job_reports_the_failed_step(no_llm, submit_job, monkeypatch):
+    import app.pipeline.brochure as brochure_module
+    from app.main import app
+
+    def broken_html(ctx):
+        raise RuntimeError("template missing")
+
+    monkeypatch.setattr(brochure_module, "html_step", broken_html)
+    job = submit_job(TestClient(app), {"hobbies": "camping"})
+    assert job["status"] == "failed"
+    assert job["error"]["failed_step"] == "html" and "template missing" in job["error"]["error"]
+    assert next(s for s in job["steps"] if s["name"] == "html")["status"] == "failed"
+    assert any(w["step"] == "input" for w in job["error"]["warnings"])
 
 
 def test_grounding_check_rejects_even_when_critic_passes(no_llm, monkeypatch):

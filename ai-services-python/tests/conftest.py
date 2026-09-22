@@ -37,3 +37,23 @@ def isolated_storage(tmp_path, monkeypatch):
     yield tmp_path / "storage"
     if search._client is not None:
         search._client.close()
+
+
+@pytest.fixture
+def submit_job():
+    """POST /api/recommend, then poll GET /api/jobs/{id} until it finishes; returns the job."""
+    import time
+
+    def submit(client, data, files=None, timeout=30):
+        resp = client.post("/api/recommend", data=data, files=files)
+        assert resp.status_code == 202, resp.text
+        status_url = resp.json()["status_url"]
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            job = client.get(status_url).json()
+            if job["status"] != "running":
+                return job
+            time.sleep(0.05)
+        raise AssertionError(f"job did not finish within {timeout}s: {job}")
+
+    return submit

@@ -112,11 +112,11 @@
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
                         </svg>
                         <span class="text-xs font-semibold text-slate-300" id="file-label">Drag & drop brochure PDF here</span>
-                        <span class="text-[10px] text-slate-500">Supported format: PDF (Max 10MB)</span>
+                        <span class="text-[10px] text-slate-500">Supported format: PDF (max 15 MB)</span>
                         <input type="file" id="brochure-input" name="brochure" accept="application/pdf" class="hidden">
                     </div>
                     <!-- Which catalog the next run will use; filled by refreshRagStats() -->
-                    <div id="catalog-status" class="text-[11px] text-slate-500"></div>
+                    <div id="catalog-status" class="text-xs text-slate-500"></div>
                 </div>
 
                 <button type="submit" id="submit-btn" class="glow-btn w-full py-3.5 rounded-xl font-bold text-sm tracking-wider uppercase text-white">
@@ -127,12 +127,14 @@
             <!-- Right Side: Results Display -->
             <div class="lg:col-span-7 space-y-6">
                 <!-- Loading State (hidden initially) -->
-                <div id="loading-card" class="hidden glass-card rounded-3xl p-10 flex flex-col items-center justify-center text-center space-y-5 h-96">
+                <div id="loading-card" class="hidden glass-card rounded-3xl p-10 flex flex-col items-center justify-center text-center space-y-5" style="min-height: 24rem;">
                     <div class="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-blue-500"></div>
                     <div class="space-y-1">
                         <h4 class="text-lg font-bold text-white" id="loading-title">Processing Request</h4>
-                        <p class="text-xs text-slate-400" id="loading-sub">Gemini is analyzing specifications and compiling matching scores...</p>
+                        <p class="text-xs text-slate-400" id="loading-sub">Starting...</p>
                     </div>
+                    <!-- Real per-step progress from GET /api/jobs/{id} -->
+                    <ol id="progress-steps" class="text-left text-xs space-y-1.5 w-full max-w-sm"></ol>
                 </div>
 
                 <!-- Empty State (shown initially) -->
@@ -433,119 +435,124 @@
         }
 
         // Form Submit handler
+        const progressSteps = document.getElementById('progress-steps');
+        const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+        const STEP_ICONS = {
+            pending: '<span class="text-slate-600">○</span>',
+            running: '<span class="text-blue-400 animate-pulse">●</span>',
+            done: '<span class="text-green-400">✓</span>',
+            failed: '<span class="text-red-400">✗</span>',
+        };
+
+        // Real progress from GET /api/jobs/{id} (replaces the old fixed-timer messages).
+        function renderProgress(job) {
+            progressSteps.innerHTML = job.steps.map(s => `
+                <li class="flex items-center justify-between ${s.status === 'pending' ? 'text-slate-500' : 'text-slate-200'}">
+                    <span>${STEP_ICONS[s.status] || ''} <span class="ml-1.5">${escapeHtml(s.label)}</span></span>
+                    <span class="font-mono text-slate-500">${s.ms != null ? (s.ms / 1000).toFixed(1) + 's' : ''}</span>
+                </li>`).join('');
+            const running = job.steps.find(s => s.status === 'running');
+            const done = job.steps.filter(s => s.status === 'done').length;
+            loadingTitle.textContent = running ? running.label : 'Finishing up';
+            loadingSub.textContent = `${job.note ? job.note + ' · ' : ''}step ${Math.min(done + 1, job.steps.length)} of ${job.steps.length}`;
+        }
+
+        async function waitForJob(statusUrl) {
+            while (true) {
+                const res = await fetch(statusUrl);
+                if (!res.ok) {
+                    const body = await res.json().catch(() => ({}));
+                    throw new Error(body.detail || `Status check failed (${res.status})`);
+                }
+                const job = await res.json();
+                renderProgress(job);
+                if (job.status === 'done') return job.result;
+                if (job.status === 'failed') {
+                    renderWarnings(job.error.warnings);
+                    throw new Error(job.error.failed_step ? `Step "${job.error.failed_step}" failed: ${job.error.error}` : job.error.error);
+                }
+                await sleep(1000);
+            }
+        }
+
+        function renderResult(data) {
+            traceIdSpan.textContent = data.trace_id;
+            if (data.pdf_url) {
+                downloadLink.href = data.pdf_url;
+                downloadLink.classList.remove('hidden');
+            } else {
+                downloadLink.classList.add('hidden');
+            }
+            renderWarnings(data.warnings);
+            resultCatalog.textContent = data.catalog
+                ? `${data.catalog.filename} (${data.catalog.source === 'reused' ? 'previously indexed' : 'just uploaded'})`
+                : 'built-in demo catalog';
+
+            // Store job ID for the dynamic email sender
+            currentJobId = data.job_id;
+            document.getElementById('delivery-email-input').value = form.elements['email'].value;
+
+            recsContainer.innerHTML = '';
+            data.recommendations.forEach((item, index) => {
+                const matchColor = item.score >= 90 ? 'bg-green-600' : (item.score >= 75 ? 'bg-blue-600' : 'bg-yellow-600');
+                recsContainer.insertAdjacentHTML('beforeend', `
+                    <div class="border border-slate-800 bg-slate-900 bg-opacity-30 rounded-2xl p-5 md:p-6 space-y-4">
+                        <div class="flex flex-col md:flex-row md:justify-between md:items-start gap-3">
+                            <div>
+                                <div class="flex items-center space-x-2">
+                                    <span class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-800 text-slate-300">Option ${index + 1}</span>
+                                    <h4 class="text-lg font-bold text-white">${escapeHtml(item.model || item.product_id)}</h4>
+                                </div>
+                                <p class="text-xs text-slate-400 italic mt-1">"${escapeHtml(item.explanation)}"</p>
+                            </div>
+                            <span class="px-3 py-1 rounded-xl text-sm font-bold text-white text-center self-start ${matchColor}">
+                                Score: ${item.score}%
+                            </span>
+                        </div>
+
+                        <div class="space-y-2">
+                            <h5 class="text-xs font-bold uppercase tracking-wider text-slate-400">Match Reasons</h5>
+                            <ul class="space-y-1.5">
+                                ${item.matched_rules.map(rule => `
+                                    <li class="flex items-start text-xs text-slate-300">
+                                        <span class="text-green-500 mr-2">✓</span>
+                                        <span>${escapeHtml(rule)}</span>
+                                    </li>
+                                `).join('')}
+                            </ul>
+                        </div>
+                    </div>
+                `);
+            });
+
+            renderRagDebug(data.rag_debug);
+        }
+
         form.addEventListener('submit', async (e) => {
             e.preventDefault();
 
-            // Set loading state
             submitBtn.disabled = true;
             submitBtn.classList.add('opacity-50');
             emptyCard.classList.add('hidden');
             resultCard.classList.add('hidden');
             loadingCard.classList.remove('hidden');
-
-            const hasFile = fileInput.files.length > 0;
-            if (hasFile) {
-                loadingTitle.textContent = "Gemini is Parsing PDF Specs";
-                loadingSub.textContent = "Uploading document and extracting catalog parameters dynamically...";
-            } else {
-                loadingTitle.textContent = "Matching Recommendations";
-                loadingSub.textContent = "Running engine rules and computing match scores...";
-            }
-
-            const formData = new FormData(form);
+            loadingTitle.textContent = 'Starting';
+            loadingSub.textContent = fileInput.files.length > 0 ? 'Uploading the catalog PDF...' : 'Submitting...';
+            progressSteps.innerHTML = '';
 
             try {
-                // Fetch dynamic status logs simulation
-                if (hasFile) {
-                    setTimeout(() => {
-                        if (!loadingCard.classList.contains('hidden')) {
-                            loadingTitle.textContent = "Generating Custom Copy";
-                            loadingSub.textContent = "Formulating segment descriptions and matching explanations...";
-                        }
-                    }, 3500);
-                    setTimeout(() => {
-                        if (!loadingCard.classList.contains('hidden')) {
-                            loadingTitle.textContent = "Printing PDF Brochure";
-                            loadingSub.textContent = "Rendering the A4 brochure in headless Chromium...";
-                        }
-                    }, 7500);
-                }
-
-                const response = await fetch('/api/recommend', {
-                    method: 'POST',
-                    body: formData
-                });
-
+                const response = await fetch('/api/recommend', { method: 'POST', body: new FormData(form) });
                 if (!response.ok) {
                     const text = await response.text();
                     let message = text || 'Curation pipeline request failed';
-                    try {
-                        const err = JSON.parse(text);
-                        message = err.failed_step ? `Step "${err.failed_step}" failed: ${err.error}` : (err.detail || message);
-                    } catch (_) { /* not JSON - keep raw text */ }
+                    try { message = JSON.parse(text).detail || message; } catch (_) { /* not JSON - keep raw text */ }
                     throw new Error(message);
                 }
+                const { status_url } = await response.json();
 
-                const data = await response.json();
-
-                // Render success details
-                traceIdSpan.textContent = data.trace_id;
-                if (data.pdf_url) {
-                    downloadLink.href = data.pdf_url;
-                    downloadLink.classList.remove('hidden');
-                } else {
-                    downloadLink.classList.add('hidden');
-                }
-                renderWarnings(data.warnings);
-                resultCatalog.textContent = data.catalog
-                    ? `${data.catalog.filename} (${data.catalog.source === 'reused' ? 'previously indexed' : 'just uploaded'})`
-                    : 'built-in demo catalog';
-                
-                // Store job ID for the dynamic email sender
-                currentJobId = data.job_id;
-                document.getElementById('delivery-email-input').value = form.elements['email'].value;
-
-                recsContainer.innerHTML = '';
-                data.recommendations.forEach((item, index) => {
-                    const matchColor = item.score >= 90 ? 'bg-green-600' : (item.score >= 75 ? 'bg-blue-600' : 'bg-yellow-600');
-                    
-                    const cardHtml = `
-                        <div class="border border-slate-800 bg-slate-900 bg-opacity-30 rounded-2xl p-5 md:p-6 space-y-4">
-                            <div class="flex flex-col md:flex-row md:justify-between md:items-start gap-3">
-                                <div>
-                                    <div class="flex items-center space-x-2">
-                                        <span class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-800 text-slate-300">Option ${index + 1}</span>
-                                        <h4 class="text-lg font-bold text-white">${escapeHtml(item.model || item.product_id)}</h4>
-                                    </div>
-                                    <p class="text-xs text-slate-400 italic mt-1">"${escapeHtml(item.explanation)}"</p>
-                                </div>
-                                <span class="px-3 py-1 rounded-xl text-sm font-bold text-white text-center self-start ${matchColor}">
-                                    Score: ${item.score}%
-                                </span>
-                            </div>
-
-                            <div class="space-y-2">
-                                <h5 class="text-xs font-bold uppercase tracking-wider text-slate-400">Match Reasons</h5>
-                                <ul class="space-y-1.5">
-                                    ${item.matched_rules.map(rule => `
-                                        <li class="flex items-start text-xs text-slate-300">
-                                            <span class="text-green-500 mr-2">✓</span>
-                                            <span>${escapeHtml(rule)}</span>
-                                        </li>
-                                    `).join('')}
-                                </ul>
-                            </div>
-                        </div>
-                    `;
-                    recsContainer.insertAdjacentHTML('beforeend', cardHtml);
-                });
-
+                renderResult(await waitForJob(status_url));
                 loadingCard.classList.add('hidden');
                 resultCard.classList.remove('hidden');
-
-                renderRagDebug(data.rag_debug);
-                refreshRagStats();
-
             } catch (err) {
                 alert(`Error: ${err.message}`);
                 loadingCard.classList.add('hidden');
@@ -553,6 +560,7 @@
             } finally {
                 submitBtn.disabled = false;
                 submitBtn.classList.remove('opacity-50');
+                refreshRagStats();
             }
         });
 

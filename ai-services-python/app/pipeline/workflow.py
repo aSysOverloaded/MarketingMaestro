@@ -13,6 +13,8 @@ from app.observability import log_stage
 
 logger = logging.getLogger("pipeline.workflow")
 
+StepListener = Callable[[str, str, Optional[int]], None]
+
 
 @dataclass
 class Step:
@@ -39,13 +41,17 @@ class Workflow:
         self.steps = steps
         self._sleep = sleep  # injectable so tests don't wait on backoff
 
-    def run(self, ctx: Any) -> None:
+    def run(self, ctx: Any, on_step: Optional[StepListener] = None) -> None:
+        """on_step(step_name, status, elapsed_ms) is called with status "running" before each
+        step and "done"/"failed" after it (elapsed_ms is None for "running")."""
         job_id = getattr(ctx, "job_id", "unknown")
         completed: List[Step] = []
+        notify = on_step or (lambda *_: None)
         log_stage(logger, job_id, "workflow", f"starting {self.name}")
 
         for step in self.steps:
             start = time.monotonic()
+            notify(step.name, "running", None)
             attempt = 0
             while True:
                 try:
@@ -55,6 +61,7 @@ class Workflow:
                     attempt += 1
                     if attempt > step.retries:
                         log_stage(logger, job_id, step.name, f"failed after {attempt} attempt(s): {e}", level="error")
+                        notify(step.name, "failed", int((time.monotonic() - start) * 1000))
                         self._compensate(ctx, completed)
                         raise WorkflowError(step.name, e) from e
                     delay = step.backoff_seconds * (2 ** (attempt - 1))
@@ -62,7 +69,9 @@ class Workflow:
                     self._sleep(delay)
 
             completed.append(step)
-            log_stage(logger, job_id, step.name, f"ok ({int((time.monotonic() - start) * 1000)} ms)")
+            elapsed_ms = int((time.monotonic() - start) * 1000)
+            notify(step.name, "done", elapsed_ms)
+            log_stage(logger, job_id, step.name, f"ok ({elapsed_ms} ms)")
 
         log_stage(logger, job_id, "workflow", f"{self.name} completed")
 
