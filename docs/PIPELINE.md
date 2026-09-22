@@ -14,7 +14,7 @@ per-step retries and rollback; the steps themselves are in
 
 | # | Step | LLM calls | Typical time | If it fails |
 |---|---|---|---|---|
-| 0 | **ingest** (only when a PDF is uploaded) | none (embeddings) | ~1 min per 100 pages, once | Demo catalog, reported |
+| 0 | **ingest** (only when a PDF is uploaded) | none (embeddings) | ~1 min per 100 blocks, once | Demo catalog, reported |
 | 1 | **profile** – segment + budget tier | 0 (rules; opt-in LLM) | instant | n/a |
 | 2 | **recommend** – retrieve → extract → rank | 2 | ~20 s | Demo catalog and/or rule-based scoring, reported |
 | 3 | **plan** – outline the sections | 0 (opt-in) | instant | Default outline, reported |
@@ -50,9 +50,10 @@ Pages pdfplumber cannot read fall back to one chunk per page, the previous behav
 (`storage/catalog.json`) and reused by later runs, including after a restart, until you upload
 another or call `DELETE /api/rag/catalog`.
 
-Embedding is the one thing that scales with catalog size: one request per page, and free-tier
-quota is 100 requests/minute, so ingesting is rate-limited (batches of 50, waiting and retrying
-when the provider says to). Scanned/image-only PDFs index nothing — there is no OCR.
+Embedding is the one thing that scales with catalog size: **one request per block**, and
+free-tier quota is 100 requests/minute, so ingest is rate-limited (batches of 50, waiting and
+retrying when the provider says to). The 133-page catalogue above is 644 blocks, i.e. ~7
+minutes of ingest — once. Scanned/image-only PDFs index nothing: there is no OCR.
 
 ### 1. Profile
 Turns age, income, family size, hobbies and location into a segment (Adventure / Executive /
@@ -66,7 +67,7 @@ family size ≥ 3 → Family, and so on.
 
 ### 2. Recommend
 1. **Retrieve** – one vector search *per hobby* ("Gear and equipment for camping"), merged by
-   page, best 6 kept. Per-hobby rather than one blended query, because a single query lets one
+   block, best 6 kept. Per-hobby rather than one blended query, because a single query lets one
    interest dominate, and because catalog text describes products, not customers — putting
    income or family size in the query only adds noise.
 2. **Extract** (LLM) – reads the matched pages and returns structured products. The prompt
