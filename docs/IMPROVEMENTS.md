@@ -8,6 +8,85 @@ Open items that have been identified but not yet done live in [Backlog](#backlog
 
 ---
 
+## 2026-09-22 — Migrated to a single Python service; Go backend removed
+
+**Why:** The Go backend was mostly glue. Four of its nine steps were HTTP clients that
+forwarded to the Python sidecar, and much of the rest was LLM plumbing (response cleanup,
+retries, fake-data fallbacks) that LangChain structured output already covers. Having two
+processes caused real bugs: API keys had to be set in two `.env` files, Pydantic schemas were
+hand-synced with Go structs that silently zero-filled mismatched fields, and every sidecar
+hiccup triggered a silent Go-side bypass. Every request is bound by LLM latency, so Go's
+speed bought nothing.
+
+**What replaced what:**
+
+| Go (removed) | Python (new) |
+|---|---|
+| `main.go` HTTP handlers | `app/main.py` (FastAPI; also serves the UI and `/storage`) |
+| `workflow/orchestrator.go` | `app/pipeline/workflow.py` — same ideas: ordered steps, per-step retries with exponential backoff, compensation in reverse order |
+| `workflow/gemini.go` (LLM calls, JSON cleanup, `simulateFallback`) | `app/ai/llm.py::invoke_structured` + new chains `app/ai/profile.py`, `extractor.py`, `ranker.py` |
+| `steps/planner.go`, `writer.go`, `critic.go`, `evaluator.go` | Deleted — the pipeline calls the existing Python chains directly |
+| `steps/profile.go`, `recommend.go` | `app/pipeline/brochure.py` steps `profile`, `recommend` |
+| `steps/compile_html.go` + `templates/brochure_template.html` | `app/render/brochure.py` + `templates/brochure.html` (Jinja2, autoescaped) |
+| `steps/render_pdf.go` (chromedp) | `app/render/pdf.py` (Playwright, in a child process) |
+| `steps/email.go` | `app/delivery/email.py` (`smtplib`) |
+| `recommendation/product_matcher.go` (unused) | Its budget/hobby scoring now powers the ranking fallback `ranker.score_products` |
+| `config.yaml`, `migrations/` (both unused) | Deleted |
+
+**Behaviour changes made during the port** (cheaper to fix than to port as-is):
+
+- **Fallbacks are reported, not hidden.** Every fallback appends to a `warnings` list returned
+  by `/api/recommend` and shown in a new UI panel. Fallbacks now use the customer's input: a
+  rule-based profile instead of a canned "Adventure / Premium", and rule-based scoring instead
+  of fixed scores of 95/88.
+- **Critic rejection now revises the copy.** The writer gets the critic's and evaluator's
+  feedback and tries again, up to `MAX_REVISIONS = 2`. Before, the critic was simply re-run on
+  the same copy until the model happened to pass it. If the copy is still rejected, or the
+  writer is down, claim-free generic copy is used; the old fallback copy asserted unverified
+  features like "whisper-quiet operation".
+- **No fake PDF.** If rendering fails the request fails; `DISABLE_PDF=true` skips it with a
+  warning and `pdf_url: null`. The old fallback wrote an invalid 40-byte "PDF".
+- **Fixed pages spilling over in the PDF (older bug).** The on-screen preview padding pushed each
+  297 mm page past A4, so every page's footer landed on an extra page: a 3-product brochure
+  printed as 8 pages instead of 4. Fixed with print-only CSS. Verified on the Go output too.
+- **No invented spec cells.** The template no longer prints "Status: Available",
+  "Quality: Certified" or a horsepower cell when the catalog doesn't state them. It shows
+  Category, Capacity and Power only when present.
+- **Security:** job ids are `uuid4` instead of timestamps (they gate PDF download and
+  `/api/send-email`); `job_id` and email are validated; CORS `*` removed (same origin now);
+  SMTP verifies TLS certificates on both 465 and STARTTLS; dev server binds `127.0.0.1`
+  instead of `0.0.0.0`.
+- **Input defaults are reported.** Empty form fields still get defaults, but the defaulted
+  fields are listed in `warnings`.
+- **Bounded latency:** chat calls have a 60 s timeout and 2 retries (`LLM_TIMEOUT_SECONDS`,
+  `LLM_MAX_RETRIES`), and there are no orchestrator retries on LLM steps. The old stack was
+  5 HTTP retries with sleeps up to 30 s, times up to 3 orchestrator retries.
+- UI: shows product names instead of mangled ids, escapes LLM-generated text, hides the PDF
+  link when there is no PDF, and shows the failed step on errors.
+- Dropped car-era leftovers: BMW/Navigator/Tesla branding branches, horsepower/seats fields,
+  and `ford`/`toyota` banned words.
+- Removed the Go-only endpoints `/api/plan`, `/api/write`, `/api/critic`, `/api/evaluate` and
+  `/api/rag/ingest`. `/api/rag/search` stays as a debugging aid.
+
+**Config:** one `ai-services-python/.env`. New optional keys: `SMTP_*`, `DISABLE_PDF` (was
+`DISABLE_CHROME_PDF`), `LLM_TIMEOUT_SECONDS`, `LLM_MAX_RETRIES`, `STORAGE_DIR`. Generated files
+now live in `ai-services-python/storage/`. Old Go output in `backend-go/storage/` was left on
+disk, untracked and gitignored.
+
+**Verified:**
+- `pytest`: 20 tests, all offline (LLM stubbed). They cover the workflow runner (order, retry
+  and backoff, reverse compensation), banned words, branding, rule-based profile and scoring,
+  that the ranker drops invented ids, an end-to-end run where every LLM step falls back, the
+  revise-with-feedback loop, rendering only stated specs plus the paragraph cap and
+  autoescaping, storage path containment, and the API routes.
+- Real PDF render through the installed Edge/Chrome: valid 4-page A4 PDF, visually checked.
+- Live run against the configured OpenRouter model. The critic rejected draft 1 (it quoted the
+  internal match score to the customer), the writer revised it, and the critic passed revision 1.
+  Two calls got `503 provider overloaded`; both fell back and were reported. Total 124 s:
+  106 s was the copy step (about 30 s per writer call on this free model), PDF 6.7 s.
+
+---
+
 ## 2026-09-22 — Quick fixes (tier 1)
 
 Found during a full read-through of the pipeline. Each of these was a confirmed bug, not a
@@ -87,27 +166,27 @@ style issue.
 
 Identified but not yet done. Ordered roughly by priority.
 
-- **Decision taken 2026-09-22: migrate to a Python-only backend** (remove `backend-go/`). Several
-  items below get simpler once there is one process.
-- **Silent fallbacks everywhere.** LLM failures produce a canned profile, a fake catalog, canned
-  copy with unverified claims, an auto-passed critic, and an invalid mock PDF — all reported as
-  `success: true`. Record every fallback in the response and show it in the UI.
-- **Critic retry re-rolls instead of revising.** A critic rejection re-runs the critic on the same
-  copy until it passes. It should re-run the writer with the critic's feedback.
-- **Critic and writer only see the top product** (`specs[0]`), while the brochure shows up to 4.
-- **Shared global state in the sidecar.** One in-memory Qdrant collection, recreated on every
-  upload, and globally named extracted images (`page_N_img_M`): concurrent users overwrite each
-  other's catalogs and images.
-- **Retry stacking and no cancellation.** LLM-call retries × orchestrator retries with sleeps that
-  ignore the request context; a bad request can hold a connection for minutes.
-- **Form defaults are silent.** Empty form fields become 32 / $120k / family of 4 / Seattle /
-  trekking without telling the user.
-- **Unverified template claims.** Placeholder spec cells render "Status: Available" and
-  "Quality: Certified" when data is missing.
-- **Security.** `/api/send-email` sends any job's PDF to any address (job IDs are timestamps);
-  CORS `*`; all of `/storage` is public; SMTP on port 465 uses `InsecureSkipVerify`.
-- **Dead code from the car-domain era.** Unused `ProductMatcher`, `config.yaml`, Postgres
-  migrations, `vehicles` table, horsepower/seats fields, BMW/Navigator/Tesla branches,
-  `ford`/`toyota` banned words, empty `frontend-nextjs/`.
-- **Dependencies.** `google.generativeai` is only installed transitively and is deprecated;
+- **The critic misses invented features.** In the live run it passed copy that mentioned a
+  "SmartThings app" and phone alerts, neither of which is in the product specs. Options: a
+  stronger model for the critic only, or a deterministic pre-check that flags capitalized
+  product and feature names in the copy that don't appear in the specs.
+- **Critic and writer only see the top product**, while the brochure shows up to 4.
+- **Shared global state.** One in-memory Qdrant collection, recreated on every upload, and
+  globally named extracted images (`page_N_img_M`). Concurrent users overwrite each other's
+  catalogs and images, including images in brochures already generated. Scope the collection
+  and image names per job, or per catalog hash.
+- **Slow on the free model.** The copy step is about 30 s per writer call, and each revision
+  costs another writer + critic round. Consider a faster model for the writer, or streaming
+  progress to the UI instead of one long request.
+- **`/storage` is fully public.** Job ids are no longer guessable, but extracted images use
+  predictable names. Serve generated files through a job-id-checked route instead.
+- **No cancellation.** When the browser disconnects, the pipeline keeps running to completion.
+- **Dependencies.** `google.generativeai` (embeddings) is deprecated; move to `google-genai`.
   Qdrant `recreate_collection` / `search` are deprecated.
+- **Leftovers:** empty `frontend-nextjs/`. The service directory is still named
+  `ai-services-python/` although it is now the whole backend.
+
+**Done** (moved out of the backlog on 2026-09-22 by the Python migration): silent fallbacks,
+critic re-rolling instead of revising, retry stacking, silent form defaults, unverified template
+claims, timestamp job ids / CORS `*` / SMTP `InsecureSkipVerify`, and the dead car-era code
+(`ProductMatcher` now drives the ranking fallback).

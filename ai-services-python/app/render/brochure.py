@@ -1,0 +1,134 @@
+"""Compile the brochure HTML (Jinja2) from the pipeline's results."""
+import base64
+import re
+from dataclasses import dataclass
+from pathlib import Path
+from typing import List, Optional
+
+from jinja2 import Environment, FileSystemLoader, select_autoescape
+
+from app.catalog import Product, Recommendation
+from app.config import SERVICE_DIR, settings
+
+# The cover is a fixed-height A4 page with overflow hidden - anything past this many
+# paragraphs would be clipped silently in the PDF.
+MAX_COVER_PARAGRAPHS = 3
+
+_env = Environment(
+    loader=FileSystemLoader(SERVICE_DIR / "templates"),
+    autoescape=select_autoescape(["html"]),
+)
+
+
+@dataclass
+class Brand:
+    name: str
+    primary_color: str
+    secondary_color: str
+    initial: str
+
+
+DEFAULT_BRAND = Brand("Premium Home", "#1e3a8a", "#0f172a", "P")
+
+# Match brand names only as standalone words: an earlier substring check for "wash"/"dryer"
+# branded every dishwasher as LG. Product categories are not brands.
+_BRANDS = [
+    (re.compile(r"\b(samsung|nq70|nv51|rf28|dw80)\b"), Brand("Samsung", "#1428a0", "#000000", "S")),
+    (re.compile(r"\blg\b"), Brand("LG Electronics", "#a50034", "#3c3c3c", "L")),
+]
+
+# Stock-photo fallback when the catalog page had no image. Checked in order.
+_STOCK_IMAGES = [
+    (("refrigerator", "fridge"), "https://images.unsplash.com/photo-1588854337236-6889d631faa8?auto=format&fit=crop&q=80&w=800"),
+    (("dishwasher",), "https://images.unsplash.com/photo-1581578731548-c64695cc6952?auto=format&fit=crop&q=80&w=800"),
+    (("washer", "washing", "dryer"), "https://images.unsplash.com/photo-1626806787461-102c1bfaaea1?auto=format&fit=crop&q=80&w=800"),
+    (("range", "oven", "stove", "cooktop", "microwave"), "https://images.unsplash.com/photo-1590794056226-79ef3a8147e1?auto=format&fit=crop&q=80&w=800"),
+]
+_DEFAULT_STOCK_IMAGE = "https://images.unsplash.com/photo-1556910103-1c02745aae4d?auto=format&fit=crop&q=80&w=800"
+
+_MIME_TYPES = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".gif": "image/gif", ".webp": "image/webp"}
+
+
+def brand_for_model(model: str) -> Brand:
+    lower = model.lower()
+    for pattern, brand in _BRANDS:
+        if pattern.search(lower):
+            return brand
+    return DEFAULT_BRAND
+
+
+def hero_image_for(product: Product) -> str:
+    if product.hero_image:
+        return embed_local_image(product.hero_image)
+    haystack = f"{product.category or ''} {product.model}".lower()
+    for keywords, url in _STOCK_IMAGES:
+        if any(k in haystack for k in keywords):
+            return url
+    return _DEFAULT_STOCK_IMAGE
+
+
+def embed_local_image(src: str) -> str:
+    """Turn a "/storage/..." path into a base64 data URI. The PDF renderer opens the compiled
+    HTML via file://, where "/storage/x.jpg" resolves against the filesystem root instead of
+    this server, so local images would silently break in the PDF. External URLs pass through."""
+    if not src.startswith("/storage/"):
+        return src
+    storage_root = settings.storage_dir.resolve()
+    path = (storage_root / src[len("/storage/"):]).resolve()
+    mime = _MIME_TYPES.get(path.suffix.lower())
+    # Unsupported formats (e.g. .jp2) can't be displayed by the browser either way.
+    if storage_root not in path.parents or mime is None or not path.is_file():
+        return src
+    return f"data:{mime};base64,{base64.b64encode(path.read_bytes()).decode('ascii')}"
+
+
+def _price(product: Product) -> Optional[str]:
+    # 0 = no price stated in the catalog; the template shows "on request".
+    return f"{product.base_price:,.2f}" if product.base_price > 0 else None
+
+
+def compile_html(
+    *,
+    job_id: str,
+    trace_id: str,
+    segment: str,
+    copy: dict,
+    recommendations: List[Recommendation],
+    products: List[Product],
+    output_dir: Path,
+) -> Path:
+    by_id = {p.id: p for p in products}
+    items = []
+    for rec in recommendations:
+        product = by_id[rec.product_id]
+        items.append({
+            "brand": brand_for_model(product.model),
+            "product": {
+                "model": product.model,
+                "price": _price(product),
+                "hero_image": hero_image_for(product),
+                "category": product.category,
+                "capacity": product.capacity,
+                "power": product.power,
+                "features": product.features,
+            },
+            "rec": rec,
+        })
+
+    html = _env.get_template("brochure.html").render(
+        brand=items[0]["brand"],
+        segment=segment,
+        trace_id=trace_id,
+        items=items,
+        copy={
+            "headline": copy.get("headline", ""),
+            "subheadline": copy.get("subheadline", ""),
+            "paragraphs": (copy.get("paragraphs") or [])[:MAX_COVER_PARAGRAPHS],
+            "cta": copy.get("cta", ""),
+        },
+    )
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    out = output_dir / f"compiled_{job_id}.html"
+    out.write_text(html, encoding="utf-8")
+    return out

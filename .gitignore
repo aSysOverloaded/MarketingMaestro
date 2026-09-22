@@ -5,16 +5,10 @@
 Thumbs.db
 *.local
 
-# Go
-/backend-go/bin/
-/backend-go/dist/
+# Former Go backend (removed 2026-09-22). Ignored so leftover local files there
+# (built binaries, .env, old generated brochures) don't show up as untracked.
+/backend-go/
 *.exe
-*.exe~
-*.dll
-*.so
-*.dylib
-*.test
-*.out
 
 # Node / Next.js
 /frontend-nextjs/node_modules/
@@ -34,6 +28,7 @@ Thumbs.db
 /ai-services-python/ENV/
 /ai-services-python/pyvenv.cfg
 /ai-services-python/.ipynb_checkpoints/
+.pytest_cache/
 __pycache__/
 *.py[cod]
 *$py.class
@@ -50,5 +45,5 @@ __pycache__/
 !.env.example
 !*.env.example
 
-# Generated storage artifacts
-/backend-go/storage/
+# Generated storage artifacts (compiled HTML, PDFs, extracted images, email logs)
+/ai-services-python/storage/

@@ -103,11 +103,8 @@ def ingest_pdf(pdf_bytes: bytes, job_id: str = "unknown") -> dict:
     # 1. Clear and create the Qdrant collection
     initialize_collection()
 
-    # Resolve Go backend storage path for extracted images
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    backend_storage = os.path.abspath(os.path.join(current_dir, "..", "..", "..", "backend-go", "storage", "extracted_images"))
-    if not os.path.exists(os.path.join(backend_storage, "..")):
-        backend_storage = os.path.abspath(os.path.join(current_dir, "..", "..", "backend-go", "storage", "extracted_images"))
+    # Served at /storage/extracted_images/<name> by app.main
+    backend_storage = str(settings.storage_dir / "extracted_images")
     os.makedirs(backend_storage, exist_ok=True)
 
     # 2. Parse PDF content
@@ -131,7 +128,7 @@ def ingest_pdf(pdf_bytes: bytes, job_id: str = "unknown") -> dict:
             continue
 
         # Extract images from this page. Sorted largest-pixel-area-first (not extraction
-        # order) so that images[0] - which Go's recommend.go takes unconditionally as the
+        # order) so that images[0] - which the recommend step takes unconditionally as the
         # brochure's hero image - is the most likely candidate to be the actual product
         # photo rather than a small decorative/lifestyle banner image that happens to be
         # placed first in the PDF's internal image order.

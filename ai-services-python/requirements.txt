@@ -2,10 +2,14 @@ fastapi==0.111.0
 uvicorn==0.30.1
 langchain-core==0.2.43
 langchain-openai==0.1.25
-langchain-google-genai==1.0.10
+# Embeddings only (app/rag/search.py). Deprecated SDK - see docs/IMPROVEMENTS.md backlog.
+google-generativeai==0.7.1
 pydantic==2.7.4
 pydantic-settings==2.3.4
 python-multipart==0.0.9
 qdrant-client==1.9.1
 pypdf==4.2.0
 Pillow>=8.0.0
+Jinja2==3.1.6
+# PDF rendering. Uses an installed Chrome/Edge if present, else run: python -m playwright install chromium
+playwright==1.63.0

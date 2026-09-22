@@ -23,11 +23,14 @@ IMPORTANT: Only reference features, materials, technologies, and specifications 
 Product Specifications above. Do not invent, imply, or add any capability, feature, or claim that is
 not present there, even if it sounds plausible or is common for this type of product. If you want to
 emphasize a quality (e.g. comfort, durability, convenience), tie it explicitly back to one of the
-listed specs rather than introducing a new unlisted feature to support it."""
+listed specs rather than introducing a new unlisted feature to support it.
+
+Reviewer feedback on the previous draft (address every point; "none" means this is the first draft):
+{feedback}"""
 )
 
 
-def generate_copy(segment: str, sections: list, candidate: dict, job_id: str = "unknown") -> dict:
+def generate_copy(segment: str, sections: list, candidate: dict, job_id: str = "unknown", feedback: str = "") -> dict:
     llm = get_chat_model("writer")
     chain = PROMPT | llm.with_structured_output(WriterOutput, include_raw=True)
 
@@ -35,6 +38,7 @@ def generate_copy(segment: str, sections: list, candidate: dict, job_id: str = "
         "segment": segment,
         "sections": json.dumps(sections),
         "candidate": json.dumps(candidate),
+        "feedback": feedback or "none",
     })
 
     if result["parsing_error"] or result["parsed"] is None:

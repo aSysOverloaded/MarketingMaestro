@@ -12,25 +12,52 @@ one is expected - makes that failure mode visible at startup instead of three
 layers of fallback later.
 """
 import logging
+from pathlib import Path
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = logging.getLogger("config")
 
+# ai-services-python/ - templates, static and storage are resolved from here so the
+# service works regardless of which directory it is launched from.
+SERVICE_DIR = Path(__file__).resolve().parent.parent
+
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(env_file=SERVICE_DIR / ".env", env_file_encoding="utf-8", extra="ignore")
 
     # Used only for embeddings (app/rag/search.py) - OpenRouter has no embeddings endpoint,
     # so this is the one call that can't move off Gemini.
     gemini_api_key: str = ""
     gemini_model: str = "gemini-3.6-flash"
 
-    # Used for the 4 chat steps (planner/writer/critic/evaluator). Names mirror
-    # backend-go/.env so the two services share a mental model, even though each
-    # process reads its own .env file and the key must be set in both.
+    # Used for every chat step (profile, extraction, ranking, planner, writer, critic, evaluator).
     llm_api_url: str = "https://openrouter.ai/api/v1"
     llm_api_key: str = ""
     llm_model: str = "nvidia/nemotron-3-super-120b-a12b:free"
+
+    # Chat-model call limits. Kept tight on purpose: every step has its own fallback, so a
+    # hung provider should fail over quickly rather than hold the request for minutes.
+    llm_timeout_seconds: float = 60.0
+    llm_max_retries: int = 2
+
+    # Optional SMTP for /api/send-email. Unset host/user = email is logged locally, not sent.
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_user: str = ""
+    smtp_pass: str = ""
+
+    # Skip PDF rendering entirely (e.g. no Chromium available). The response then carries
+    # pdf_url = null plus a warning - there is no mock PDF.
+    disable_pdf: bool = False
+
+    # Root for generated files (compiled HTML, PDFs, extracted catalog images, email logs).
+    # Relative paths resolve against this service's directory, not the process cwd.
+    storage_dir: Path = SERVICE_DIR / "storage"
+
+    @property
+    def has_smtp(self) -> bool:
+        return bool(self.smtp_host.strip() and self.smtp_user.strip())
 
     @property
     def has_gemini_key(self) -> bool:
@@ -56,8 +83,10 @@ def log_startup_config() -> None:
     logger.info(f"[config] GEMINI_MODEL={settings.gemini_model}")
 
     if settings.has_llm_key:
-        logger.info(f"[config] LLM_API_KEY is set (length={len(settings.llm_api_key.strip())}) - used for plan/write/critic/evaluate")
+        logger.info(f"[config] LLM_API_KEY is set (length={len(settings.llm_api_key.strip())}) - used for every chat step")
     else:
-        logger.warning("[config] LLM_API_KEY is NOT set - plan/write/critic will fail loud, evaluate will degrade")
+        logger.warning("[config] LLM_API_KEY is NOT set - every chat step will run on its deterministic fallback")
     logger.info(f"[config] LLM_API_URL={settings.llm_api_url}")
     logger.info(f"[config] LLM_MODEL={settings.llm_model}")
+    logger.info(f"[config] SMTP {'configured for ' + settings.smtp_host if settings.has_smtp else 'NOT configured - emails are logged locally'}")
+    logger.info(f"[config] PDF rendering {'DISABLED' if settings.disable_pdf else 'enabled'}; storage_dir={settings.storage_dir}")

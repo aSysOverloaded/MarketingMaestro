@@ -161,6 +161,12 @@
                         </a>
                     </div>
 
+                    <!-- Pipeline warnings: every fallback the run took (empty = fully AI-generated and checked) -->
+                    <div id="warnings-box" class="hidden rounded-2xl border border-yellow-700 bg-yellow-900 bg-opacity-20 p-4 space-y-2">
+                        <h4 class="text-xs font-bold text-yellow-300 uppercase tracking-wider">This run used fallbacks</h4>
+                        <ul id="warnings-list" class="space-y-1 text-xs text-yellow-100"></ul>
+                    </div>
+
                     <!-- Inline Email Delivery Section -->
                     <div class="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-slate-900 bg-opacity-40 p-4 rounded-2xl border border-slate-800">
                         <div class="space-y-0.5">
@@ -238,6 +244,20 @@
         const recsContainer = document.getElementById('recs-container');
         const traceIdSpan = document.getElementById('trace-id');
         const downloadLink = document.getElementById('download-link');
+        const warningsBox = document.getElementById('warnings-box');
+        const warningsList = document.getElementById('warnings-list');
+
+        function renderWarnings(warnings) {
+            if (!warnings || warnings.length === 0) {
+                warningsBox.classList.add('hidden');
+                warningsList.innerHTML = '';
+                return;
+            }
+            warningsList.innerHTML = warnings.map(w => `
+                <li><span class="font-mono text-yellow-400">[${escapeHtml(w.step)}]</span> ${escapeHtml(w.message)}</li>
+            `).join('');
+            warningsBox.classList.remove('hidden');
+        }
 
         const loadingTitle = document.getElementById('loading-title');
         const loadingSub = document.getElementById('loading-sub');
@@ -421,7 +441,7 @@
                     setTimeout(() => {
                         if (!loadingCard.classList.contains('hidden')) {
                             loadingTitle.textContent = "Printing PDF Brochure";
-                            loadingSub.textContent = "Executing headless Chrome render layout via Chromedp...";
+                            loadingSub.textContent = "Rendering the A4 brochure in headless Chromium...";
                         }
                     }, 7500);
                 }
@@ -433,14 +453,25 @@
 
                 if (!response.ok) {
                     const text = await response.text();
-                    throw new Error(text || 'Curation pipeline request failed');
+                    let message = text || 'Curation pipeline request failed';
+                    try {
+                        const err = JSON.parse(text);
+                        message = err.failed_step ? `Step "${err.failed_step}" failed: ${err.error}` : (err.detail || message);
+                    } catch (_) { /* not JSON - keep raw text */ }
+                    throw new Error(message);
                 }
 
                 const data = await response.json();
 
                 // Render success details
                 traceIdSpan.textContent = data.trace_id;
-                downloadLink.href = data.pdf_url;
+                if (data.pdf_url) {
+                    downloadLink.href = data.pdf_url;
+                    downloadLink.classList.remove('hidden');
+                } else {
+                    downloadLink.classList.add('hidden');
+                }
+                renderWarnings(data.warnings);
                 
                 // Store job ID for the dynamic email sender
                 currentJobId = data.job_id;
@@ -456,9 +487,9 @@
                                 <div>
                                     <div class="flex items-center space-x-2">
                                         <span class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-800 text-slate-300">Option ${index + 1}</span>
-                                        <h4 class="text-lg font-bold text-white">${item.product_id.replace('appliance_', '').replace('car_', '').replace('suv_', '').replace('sedan_', '').toUpperCase()}</h4>
+                                        <h4 class="text-lg font-bold text-white">${escapeHtml(item.model || item.product_id)}</h4>
                                     </div>
-                                    <p class="text-xs text-slate-400 italic mt-1">"${item.explanation}"</p>
+                                    <p class="text-xs text-slate-400 italic mt-1">"${escapeHtml(item.explanation)}"</p>
                                 </div>
                                 <span class="px-3 py-1 rounded-xl text-sm font-bold text-white text-center self-start ${matchColor}">
                                     Score: ${item.score}%
@@ -471,7 +502,7 @@
                                     ${item.matched_rules.map(rule => `
                                         <li class="flex items-start text-xs text-slate-300">
                                             <span class="text-green-500 mr-2">✓</span>
-                                            <span>${rule}</span>
+                                            <span>${escapeHtml(rule)}</span>
                                         </li>
                                     `).join('')}
                                 </ul>
